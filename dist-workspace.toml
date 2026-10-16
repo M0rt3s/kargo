@@ -1,0 +1,23 @@
+# cargo-dist 0.33 configuration. Configuration only: nothing is published from here.
+# `ci` is deliberately omitted: with it, `dist` expects a generated release workflow. Add
+# `ci = "github"` and `publish-jobs = ["homebrew"]`, then run `dist generate`, when the first
+# release is prepared.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.33.0"
+installers = ["shell", "powershell", "homebrew", "npm"]
+tap = "M0rt3s/homebrew-tap"
+npm-scope = "@m0rt3s"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+install-path = "CARGO_HOME"
+install-updater = false
+pr-run-mode = "plan"

@@ -1,0 +1,81 @@
+[package]
+name = "voidkargo-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Agent-grade CLI and MCP server for voidkargo"
+license = "Apache-2.0"
+repository = "https://github.com/M0rt3s/kargo"
+homepage = "https://voidkargo.com"
+readme = "README.md"
+include = [
+    "/src/**",
+    "/tests/**",
+    "/docs/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/NOTICE",
+]
+keywords = ["mcp", "cli", "agents", "voidkargo"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env", "string", "wrap_help"] }
+clap_complete = "4.6.11"
+comfy-table = { version = "8.0.1", features = ["custom_styling"] }
+directories = "6.0.0"
+http = "1"
+jsonschema = { version = "0.58.6", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
+rmcp = { version = "3.5.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
+serde = { version = "1.0.229", features = ["derive"] }
+rpassword = "7.5.4"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+
+[lib]
+name = "kargo"
+
+[[bin]]
+name = "kargo"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+# Relaxed pedantic lints, each with its reason:
+# Types such as `cli::Cli` and `serve::ServeOptions` name themselves after their module on purpose.
+module_name_repetitions = "allow"
+# Every fallible function returns the one crate-wide `Error`; its variants are documented once.
+missing_errors_doc = "allow"
+# Nearly every pure helper would be flagged; `#[must_use]` on all of them is noise.
+must_use_candidate = "allow"
+# The only panics are in tests and are asserted there.
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+
+# The profile `dist` builds release artefacts with.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3"
+tempfile = "3"
+rmcp = { version = "3.5.1", features = ["client", "reqwest", "transport-streamable-http-client-reqwest", "transport-child-process"] }

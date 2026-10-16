@@ -1,0 +1,6 @@
+kargo
+Copyright 2026 kargo contributors
+
+This product is a client for voidkargo (https://voidkargo.com).
+It includes no game data; everything game-specific is fetched from the
+server at run time.
