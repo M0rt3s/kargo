@@ -177,6 +177,7 @@ fn with_default_port(origin: &str) -> String {
 
 /// Bind `options.bind`, serve until SIGINT/SIGTERM, then shut down gracefully.
 pub async fn run_until_signal(options: ServeOptions) -> Result<()> {
+    let shutdown = shutdown_signal()?;
     let listener = TcpListener::bind(&options.bind)
         .await
         .map_err(|err| Error::Unexpected(format!("cannot listen on {}: {err}", options.bind)))?;
@@ -185,7 +186,7 @@ pub async fn run_until_signal(options: ServeOptions) -> Result<()> {
         "kargo serve: listening on http://{local}{} (public {})",
         options.mount_path, options.public_url
     );
-    run(listener, options, shutdown_signal()).await
+    run(listener, options, shutdown).await
 }
 
 /// Serve on `listener` until `shutdown` completes.
@@ -335,20 +336,25 @@ async fn limit_load(State(limits): State<Arc<Limits>>, request: Request, next: N
     next.run(request).await
 }
 
-async fn shutdown_signal() {
-    let interrupt = async {
+/// Registers the handlers now, so a signal from here on is not lost; the future ends on the first.
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl Future<Output = ()> + Send + 'static> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let register =
+        |kind| signal(kind).map_err(|err| Error::Unexpected(format!("cannot watch signals: {err}")));
+    let mut terminate = register(SignalKind::terminate())?;
+    let mut interrupt = register(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
+    })
+}
+
+/// The future ends on the first Ctrl-C.
+#[cfg(not(unix))]
+fn shutdown_signal() -> Result<impl Future<Output = ()> + Send + 'static> {
+    Ok(async {
         let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => tokio::select! { () = interrupt => {}, _ = terminate.recv() => {} },
-            Err(_) => interrupt.await,
-        }
-    }
-    #[cfg(not(unix))]
-    interrupt.await;
+    })
 }
 
 #[cfg(test)]
