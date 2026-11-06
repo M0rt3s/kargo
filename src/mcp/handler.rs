@@ -12,22 +12,24 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 
 use crate::act::{self, Outcome};
 use crate::api::Client;
 use crate::cache::SwrCache;
-use crate::catalogue::{CACHE_TTL, Catalogue, MemoryCache};
+use crate::catalogue::{CACHE_TTL, Catalogue, MemoryCache, ReadSpec};
 use crate::errors::{Error, Surface, describe_duration};
 use crate::output::{sanitize, sanitize_json};
+use crate::read;
 use crate::verifier::TokenVerifier;
 
 use super::gate::{ActGate, DEFAULT_QUEUE};
 use super::tools::{self, HELP_TOOL, VIEW_TOOL};
 
 const INSTRUCTIONS: &str = "Tools mirror the game server's own catalogue. Call `help` first to read how the \
-game works, `view` to look at the current state, then use the command tools to act. Commands are paced by \
+game works, `view` to look at the current state, the read tools to ask questions, then use the command tools to act. Commands are paced by \
 the server; if one is refused, the message says why.";
 
 /// Where the game API token comes from.
@@ -153,6 +155,9 @@ impl KargoMcp {
             }
             name => {
                 if catalogue.command(name).is_none() {
+                    if let Some(spec) = catalogue.read(name) {
+                        return Ok(self.within(read(&client, spec, &arguments)).await?);
+                    }
                     return Err(Failure::UnknownTool(name.to_owned()));
                 }
                 let turn = self.gate.enter(token.as_deref(), deadline).await?;
@@ -243,6 +248,31 @@ async fn view(
     }
     let query: Vec<(&str, &str)> = section.map(|s| ("section", s)).into_iter().collect();
     let reply = client.get(&catalogue.endpoints.view, &query).await?;
+    Ok(structured(&reply.json()?))
+}
+
+/// Ask a read tool. It rides the read allowance, never the act gate, and a repeat changes nothing.
+async fn read(
+    client: &Client,
+    spec: &ReadSpec,
+    arguments: &Map<String, Value>,
+) -> Result<CallToolResult, Error> {
+    let mut params = HashMap::new();
+    for (name, value) in arguments {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            Value::Bool(flag) => flag.to_string(),
+            _ => {
+                return Err(Error::Schema(format!(
+                    "`{}` must be a string, number or boolean",
+                    sanitize(name)
+                )));
+            }
+        };
+        params.insert(name.clone(), text);
+    }
+    let reply = read::fetch(client, spec, &params).await?;
     Ok(structured(&reply.json()?))
 }
 

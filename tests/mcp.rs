@@ -58,7 +58,28 @@ async fn stdio_lists_tools_generated_from_the_catalogue() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        ["view", "help", "ping", "rename", "toggle", "shift", "tangle", "xref_http", "xref_file", "peek"]
+        [
+            "view",
+            "help",
+            "ping",
+            "rename",
+            "toggle",
+            "shift",
+            "tangle",
+            "xref_http",
+            "xref_file",
+            "peek",
+            "scout"
+        ]
+    );
+    let scout = tools.iter().find(|t| t.name == "scout").unwrap();
+    assert_eq!(scout.title.as_deref(), Some("Scout a target"));
+    assert_eq!(scout.input_schema["required"], json!(["target"]));
+    assert!(scout.input_schema["properties"].get("max_depth").is_some());
+    let hints = scout.annotations.as_ref().unwrap();
+    assert_eq!(
+        (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint),
+        (Some(true), Some(false), Some(true))
     );
 
     let ping = tools.iter().find(|t| t.name == "ping").unwrap();
@@ -262,6 +283,60 @@ async fn stdio_view_and_help_tools_work() {
     assert_eq!(bad.is_error, Some(true));
     let help = client.call_tool(call("help", &json!({}))).await.unwrap();
     assert!(first_text(&help).starts_with("Fixture help"));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_read_tool_returns_the_servers_reply_and_is_never_an_act() {
+    let mock = Mock::start();
+    let client = stdio_client(&mock, Some(GOOD_TOKEN)).await;
+    let result = client.call_tool(call("scout", &json!({"target": "a b&c", "max_depth": 2}))).await.unwrap();
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(result.structured_content, Some(json!({"scout": {"target": "a b&c", "max_depth": "2"}})));
+    let hidden = client.call_tool(call("scout", &json!({"target": "hidden"}))).await.unwrap();
+    assert_ne!(hidden.is_error, Some(true));
+    assert_eq!(hidden.structured_content, Some(json!({"scout": null})));
+    assert_eq!(mock.state.act_hits.load(Ordering::SeqCst), 0);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_read_tool_refuses_unknown_and_missing_parameters_locally() {
+    let mock = Mock::start();
+    let client = stdio_client(&mock, Some(GOOD_TOKEN)).await;
+    for arguments in [json!({"target": "x", "bogus": 1}), json!({}), json!({"target": ["x"]})] {
+        let result = client.call_tool(call("scout", &arguments)).await.unwrap();
+        assert_eq!(result.is_error, Some(true), "{arguments}");
+        assert_eq!(result.structured_content.unwrap()["kind"], "schema");
+    }
+    assert_eq!(mock.state.read_hits.load(Ordering::SeqCst), 0);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_read_tool_waits_out_a_rate_limit_and_reports_a_bad_token() {
+    let mock = Mock::start();
+    mock.state.rate_limited_reads.store(1, Ordering::SeqCst);
+    let client = stdio_client(&mock, Some(GOOD_TOKEN)).await;
+    let result = client.call_tool(call("scout", &json!({"target": "x"}))).await.unwrap();
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(mock.state.read_hits.load(Ordering::SeqCst), 2);
+    client.cancel().await.unwrap();
+    let client = stdio_client(&mock, None).await;
+    let result = client.call_tool(call("scout", &json!({"target": "x"}))).await.unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(result.structured_content.unwrap()["kind"], "auth");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_a_server_without_read_tools_offers_none() {
+    let mock = Mock::start();
+    mock.state.no_reads.store(true, Ordering::SeqCst);
+    let client = stdio_client(&mock, Some(GOOD_TOKEN)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    assert!(tools.iter().all(|t| t.name != "scout"));
+    assert!(client.call_tool(call("scout", &json!({"target": "x"}))).await.is_err());
     client.cancel().await.unwrap();
 }
 

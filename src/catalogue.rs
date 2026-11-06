@@ -101,6 +101,37 @@ impl CommandSpec {
     }
 }
 
+/// One query parameter of a read tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadParam {
+    /// The query parameter's name.
+    pub name: String,
+    /// The tool refuses a call without it.
+    #[serde(default)]
+    pub required: bool,
+    /// What the parameter means, in the server's words.
+    #[serde(default, alias = "note")]
+    pub description: String,
+}
+
+/// One read-only question the server answers with a `GET`; it never changes anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadSpec {
+    /// The tool's wire name.
+    pub name: String,
+    /// A short human title.
+    #[serde(default)]
+    pub title: String,
+    /// Server-authored description.
+    #[serde(default)]
+    pub description: String,
+    /// The query parameters it takes.
+    #[serde(default)]
+    pub params: Vec<ReadParam>,
+    /// Path to `GET`.
+    pub path: String,
+}
+
 /// The parsed catalogue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalogue {
@@ -119,6 +150,10 @@ pub struct Catalogue {
     pub view_sections: Vec<String>,
     /// All usable commands: names that are not safe to use and repeated names are dropped.
     pub commands: Vec<CommandSpec>,
+    /// All usable read tools (none from a server that offers none): names and parameters that
+    /// are not safe to use and repeated names are dropped.
+    #[serde(default)]
+    pub reads: Vec<ReadSpec>,
     /// What was dropped from the server's list, in words (already safe to print).
     #[serde(skip)]
     pub skipped: Vec<String>,
@@ -159,12 +194,46 @@ impl Catalogue {
             }
             true
         });
+        self.keep_usable_reads(&mut skipped);
         self.skipped = skipped;
+    }
+
+    /// The same rules for read tools and their parameters.
+    fn keep_usable_reads(&mut self, skipped: &mut Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
+        self.reads.retain_mut(|spec| {
+            if !names::is_valid(&spec.name) {
+                skipped.push(format!("read {}: unusable name", quoted(&spec.name)));
+                return false;
+            }
+            if !seen.insert(spec.name.clone()) {
+                skipped.push(format!("read {}: repeated name", quoted(&spec.name)));
+                return false;
+            }
+            let mut params = std::collections::HashSet::new();
+            let tool = quoted(&spec.name);
+            spec.params.retain(|param| {
+                let usable = names::is_valid(&param.name) && params.insert(param.name.clone());
+                if !usable {
+                    skipped.push(format!(
+                        "parameter {} of {tool}: unusable or repeated name",
+                        quoted(&param.name)
+                    ));
+                }
+                usable
+            });
+            true
+        });
     }
 
     /// Find a command by name.
     pub fn command(&self, name: &str) -> Option<&CommandSpec> {
         self.commands.iter().find(|c| c.name == name)
+    }
+
+    /// Find a read tool by name.
+    pub fn read(&self, name: &str) -> Option<&ReadSpec> {
+        self.reads.iter().find(|r| r.name == name)
     }
 
     /// Fetch the catalogue from the server, with the body exactly as received.
@@ -319,6 +388,51 @@ mod tests {
         .unwrap();
         let names: Vec<&str> = catalogue.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["other_cmd"]);
+        assert_eq!(catalogue.skipped.len(), 5);
+        assert!(catalogue.skipped.iter().all(|line| !line.contains(['\u{1b}', '\u{7}'])));
+    }
+
+    #[test]
+    fn a_catalogue_without_reads_parses_with_no_read_tools() {
+        let catalogue = Catalogue::from_value(&sample(1)).unwrap();
+        assert!(catalogue.reads.is_empty());
+        assert!(catalogue.read("scout").is_none());
+    }
+
+    #[test]
+    fn reads_parse_with_the_servers_field_names_and_tolerate_the_description_spelling() {
+        let mut value = sample(1);
+        value["reads"] = json!([{
+            "name": "scout", "title": "Scout", "description": "d", "path": "/r",
+            "params": [
+                {"name": "target", "required": true, "note": "who"},
+                {"name": "depth", "description": "how far"}
+            ]
+        }]);
+        let catalogue = Catalogue::from_value(&value).unwrap();
+        let scout = catalogue.read("scout").unwrap();
+        assert_eq!(scout.path, "/r");
+        assert!(scout.params[0].required && !scout.params[1].required);
+        assert_eq!(
+            (scout.params[0].description.as_str(), scout.params[1].description.as_str()),
+            ("who", "how far")
+        );
+    }
+
+    #[test]
+    fn unusable_and_repeated_read_names_are_dropped_like_commands() {
+        let mut value = sample(1);
+        value["reads"] = json!([
+            {"name": "scout", "path": "/first", "params": [{"name": "a"}, {"name": "a"}, {"name": "-b"}, {"name": "c"}]},
+            {"name": "scout", "path": "/second"},
+            {"name": "-x", "path": "/x"},
+            {"name": "evil\u{1b}]0;PWNED\u{7}", "path": "/y"}
+        ]);
+        let catalogue = Catalogue::from_value(&value).unwrap();
+        assert_eq!(catalogue.reads.len(), 1);
+        assert_eq!(catalogue.reads[0].path, "/first");
+        let params: Vec<&str> = catalogue.reads[0].params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(params, ["a", "c"]);
         assert_eq!(catalogue.skipped.len(), 5);
         assert!(catalogue.skipped.iter().all(|line| !line.contains(['\u{1b}', '\u{7}'])));
     }

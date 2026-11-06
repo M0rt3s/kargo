@@ -196,13 +196,10 @@ pub struct Request {
     pub max_wait: Option<u64>,
 }
 
-/// Parse the arguments after `kargo act`. `Ok(None)` means help was printed.
-///
-/// With `json`, nothing but the final error object may reach stderr, so help text is not echoed
-/// when a command is missing.
-pub fn parse(catalogue: &Catalogue, raw: &[String], json: bool) -> Result<Option<Request>> {
-    let matches = match command(catalogue).try_get_matches_from(raw) {
-        Ok(matches) => matches,
+/// Match `raw` against a generated command tree. `Ok(None)` means help was printed.
+pub(super) fn matches(command: Command, raw: &[String], json: bool) -> Result<Option<ArgMatches>> {
+    match command.try_get_matches_from(raw) {
+        Ok(matches) => Ok(Some(matches)),
         Err(err)
             if matches!(
                 err.kind(),
@@ -217,10 +214,18 @@ pub fn parse(catalogue: &Catalogue, raw: &[String], json: bool) -> Result<Option
                 return Err(Error::Usage("a command is required".into()));
             }
             output::write_stdout(&text)?;
-            return Ok(None);
+            Ok(None)
         }
-        Err(err) => return Err(usage_error(&err)),
-    };
+        Err(err) => Err(usage_error(&err)),
+    }
+}
+
+/// Parse the arguments after `kargo act`. `Ok(None)` means help was printed.
+///
+/// With `json`, nothing but the final error object may reach stderr, so help text is not echoed
+/// when a command is missing.
+pub fn parse(catalogue: &Catalogue, raw: &[String], json: bool) -> Result<Option<Request>> {
+    let Some(matches) = matches(command(catalogue), raw, json)? else { return Ok(None) };
     let Some((name, sub)) = matches.subcommand() else {
         return Err(Error::Usage("a command is required".into()));
     };

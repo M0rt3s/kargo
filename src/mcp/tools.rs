@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
-use crate::catalogue::{Catalogue, CommandSpec};
+use crate::catalogue::{Catalogue, CommandSpec, ReadSpec};
 use crate::output::sanitize;
 
 /// Name of the built-in read-only state tool.
@@ -13,16 +13,22 @@ pub const VIEW_TOOL: &str = "view";
 /// Name of the built-in rules/help tool.
 pub const HELP_TOOL: &str = "help";
 
-/// All tools for a catalogue: `view`, `help`, then one per game command.
+/// All tools for a catalogue: `view`, `help`, one per game command, then one per read tool.
 ///
 /// The two built-ins win a name clash: a catalogue command called `view` or
-/// `help` would be shadowed and is left out.
+/// `help` would be shadowed and is left out. A read tool named like a built-in or a command
+/// is left out too.
 pub fn build(catalogue: &Catalogue) -> Vec<Tool> {
     let mut tools = vec![view_tool(catalogue), help_tool()];
     tools.extend(
         catalogue.commands.iter().filter(|c| c.name != VIEW_TOOL && c.name != HELP_TOOL).map(command_tool),
     );
+    tools.extend(catalogue.reads.iter().filter(|r| !is_taken(catalogue, &r.name)).map(read_tool));
     tools
+}
+
+fn is_taken(catalogue: &Catalogue, name: &str) -> bool {
+    name == VIEW_TOOL || name == HELP_TOOL || catalogue.command(name).is_some()
 }
 
 fn view_tool(catalogue: &Catalogue) -> Tool {
@@ -62,6 +68,31 @@ fn command_tool(spec: &CommandSpec) -> Tool {
             .destructive(hints.destructive_hint)
             .idempotent(hints.idempotent_hint),
     )
+}
+
+/// A read tool: every listed parameter is a scalar, sent as a query value.
+fn read_tool(spec: &ReadSpec) -> Tool {
+    let properties: JsonObject = spec
+        .params
+        .iter()
+        .map(|p| {
+            let schema =
+                json!({ "type": ["string", "number", "boolean"], "description": sanitize(&p.description) });
+            (p.name.clone(), schema)
+        })
+        .collect();
+    let required: Vec<&str> = spec.params.iter().filter(|p| p.required).map(|p| p.name.as_str()).collect();
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    });
+    let mut tool = Tool::new(spec.name.clone(), sanitize(&spec.description), object(schema));
+    if !spec.title.is_empty() {
+        tool = tool.with_title(sanitize(&spec.title));
+    }
+    tool.with_annotations(read_only())
 }
 
 fn read_only() -> ToolAnnotations {
@@ -131,6 +162,42 @@ mod tests {
         let tool = build(&catalogue).into_iter().find(|t| t.name == "alpha_cmd").unwrap();
         assert_eq!(tool.description.as_deref(), Some("De]0;PWNEDscription"));
         assert_eq!(tool.title.as_deref(), Some("Ti[31mtle"));
+    }
+
+    fn catalogue_with_reads() -> Catalogue {
+        Catalogue::from_value(&json!({
+            "schema_version": 1,
+            "endpoints": {"view": "/v", "act": "/a", "help": "/h"},
+            "commands": [{"name": "ping", "input_schema": {"type": "object"}}],
+            "reads": [
+                {"name": "scout", "title": "Scout", "description": "d", "path": "/r",
+                 "params": [{"name": "target", "required": true, "description": "who"}, {"name": "depth"}]},
+                {"name": "ping", "path": "/p"},
+                {"name": "help", "path": "/q"}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn read_tools_follow_the_commands_and_never_shadow_another_tool() {
+        let names: Vec<String> = build(&catalogue_with_reads()).iter().map(|t| t.name.to_string()).collect();
+        assert_eq!(names, ["view", "help", "ping", "scout"]);
+    }
+
+    #[test]
+    fn a_read_tool_is_read_only_with_its_parameters_as_the_input_schema() {
+        let tools = build(&catalogue_with_reads());
+        let scout = tools.iter().find(|t| t.name == "scout").unwrap();
+        let hints = scout.annotations.as_ref().unwrap();
+        assert_eq!(hints.read_only_hint, Some(true));
+        assert_eq!(hints.destructive_hint, Some(false));
+        assert_eq!(hints.idempotent_hint, Some(true));
+        assert_eq!(scout.title.as_deref(), Some("Scout"));
+        assert_eq!(scout.input_schema["required"], json!(["target"]));
+        assert_eq!(scout.input_schema["additionalProperties"], json!(false));
+        assert_eq!(scout.input_schema["properties"]["target"]["description"], "who");
+        assert!(scout.input_schema["properties"].get("depth").is_some());
     }
 
     #[test]

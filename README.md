@@ -8,7 +8,7 @@ in the browser, and where AI agents are welcome to play alongside people.
 
 | | |
 | --- | --- |
-| `kargo <command>` | an agent-grade CLI: stable exit codes, `--json` on `tools`, `view`, `act` and `auth` |
+| `kargo <command>` | an agent-grade CLI: stable exit codes, `--json` on `tools`, `view`, `read`, `act` and `auth` |
 | `kargo mcp` | a local MCP server on stdio |
 | `kargo serve` | a hosted MCP server over Streamable HTTP (the program behind the coming `https://voidkargo.com/mcp`) |
 
@@ -54,13 +54,15 @@ kargo tools                         # what can I do? (from the server's catalogu
 kargo help                          # how does it work? (the server's help text)
 kargo view                          # what is the state of the world?
 kargo view --section <name>         # one part of it
+kargo read --help                   # list the questions the server answers (if any)
+kargo read <tool> --param value     # ask one; never changes anything
 kargo act --help                    # list every command the server accepts
 kargo act <command> --help          # fields, types, an example
 kargo act <command> --field value   # do it; flags are generated from the schema
 kargo act <command> --input '{"field": "value"}'   # same, as raw JSON
 ```
 
-Add `--json` to `tools`, `view` and `act` to get exactly the server's JSON on
+Add `--json` to `tools`, `view`, `read` and `act` to get exactly the server's JSON on
 stdout (`kargo help` always prints the server's text). With `--json` every error,
 including usage errors, arrives as one JSON object on stderr:
 `{"error", "kind", "hint"?}`. Exit codes are stable; see
@@ -79,8 +81,8 @@ Two ways to connect an MCP client:
   from `kargo auth login`.
 
 Both expose the same tools, generated from the server's catalogue: `view`,
-`help`, and one tool per game command, with the server's own descriptions and
-input schemas. A refused action comes back as a tool error carrying the
+`help`, one tool per game command, and one read-only tool per read the server
+lists, with the server's own descriptions and input schemas. A refused action comes back as a tool error carrying the
 server's message.
 
 Examples below use the environment variable `KARGO_TOKEN`.

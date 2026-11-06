@@ -8,6 +8,9 @@ All notable changes are recorded here. The format follows
 
 ### Added
 
+- `kargo read <tool>` and matching read-only MCP tools for the `reads` the server lists in its
+  catalogue; an older server without `reads` offers none. Values are percent-encoded, unlisted
+  parameters are refused locally, and reads share `view`'s rate limit.
 - `kargo tools`, `help`, `view` and `act`, driven entirely by the server's catalogue.
 - Flags for `act` generated from each command's JSON Schema, with local validation.
 - `kargo auth login | logout | status`.
