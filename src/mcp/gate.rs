@@ -58,8 +58,10 @@ impl ActGate {
         let queued = {
             let mut slots = self.slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // A slot nobody else holds is idle: forget it so the map cannot grow without bound.
+            // Waiters are read first: a caller stops waiting only after it holds the turn, so
+            // holders read the other way round could be missed as one passes between the two.
             slots.retain(|_, slot| {
-                Arc::strong_count(&slot.turn) > 1 || slot.waiting.load(Ordering::SeqCst) > 0
+                slot.waiting.load(Ordering::SeqCst) > 0 || Arc::strong_count(&slot.turn) > 1
             });
             let slot = Arc::clone(slots.entry(token_hash::hash(token)).or_default());
             if slot.waiting.fetch_add(1, Ordering::SeqCst) >= self.max_queue {
