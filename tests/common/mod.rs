@@ -46,6 +46,8 @@ pub struct MockState {
     pub last_read_query: Mutex<Option<std::collections::HashMap<String, String>>>,
     /// Serve the catalogue of a server that lists no read tools: no `reads` key at all.
     pub no_reads: std::sync::atomic::AtomicBool,
+    /// List reads named like a command and like the built-in tools.
+    pub clash_reads: std::sync::atomic::AtomicBool,
     pub retry_after: Mutex<String>,
     pub last_authorization: Mutex<Option<String>>,
     pub last_act_body: Mutex<Option<Value>>,
@@ -253,6 +255,13 @@ async fn tools(State(state): State<Arc<MockState>>) -> Response {
     let mut catalogue = catalogue_json(version);
     if state.no_reads.load(Ordering::SeqCst) {
         catalogue.as_object_mut().unwrap().remove("reads");
+    }
+    if state.clash_reads.load(Ordering::SeqCst) {
+        let reads = catalogue["reads"].as_array_mut().unwrap();
+        for name in ["ping", "view", "help"] {
+            let param = json!({"name": "json", "required": true, "note": "x"});
+            reads.push(json!({"name": name, "params": [param], "path": "/api/agent/scout"}));
+        }
     }
     if state.hostile.load(Ordering::SeqCst) {
         hostile_catalogue(&mut catalogue);

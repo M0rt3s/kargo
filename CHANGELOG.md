@@ -10,10 +10,13 @@ All notable changes are recorded here. The format follows
 
 - `kargo read <tool>` and matching read-only MCP tools for the `reads` the server lists in its
   catalogue; an older server without `reads` offers none. Values are percent-encoded, unlisted
-  parameters are refused locally, and reads share `view`'s rate limit. A bad `reads` entry is
-  skipped and never breaks the rest of the catalogue.
-- Text from the server also loses invisible formatting and tag characters (bidi overrides,
-  zero-width characters).
+  parameters are refused locally, and reads share `view`'s rate limit. A bad `reads` entry (malformed,
+  unsafe name or path, named like a command or a built-in, an unusable required parameter) is
+  skipped rather than breaking the rest of the catalogue.
+- Catalogue text, help text, error messages and human-readable output also lose invisible
+  formatting characters (bidi overrides, zero-width characters, tag characters, separators,
+  variation selectors U+E0100..E01EF); the zero-width joiner and U+FE00..FE0F stay so emoji stay
+  whole. `--json` output and MCP structured results are the server's JSON, unchanged.
 - `kargo tools`, `help`, `view` and `act`, driven entirely by the server's catalogue.
 - Flags for `act` generated from each command's JSON Schema, with local validation.
 - `kargo auth login | logout | status`.

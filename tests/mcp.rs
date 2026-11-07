@@ -380,6 +380,25 @@ async fn stdio_a_read_never_waits_in_the_act_gate() {
 }
 
 #[tokio::test]
+async fn stdio_a_read_named_like_a_command_or_built_in_is_not_offered_and_the_command_still_acts() {
+    let mock = Mock::start();
+    mock.state.clash_reads.store(true, Ordering::SeqCst);
+    let client = stdio_client(&mock, Some(GOOD_TOKEN)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let count = |name: &str| tools.iter().filter(|t| t.name == name).count();
+    assert_eq!((count("ping"), count("view"), count("help")), (1, 1, 1));
+    assert_eq!(
+        tools.iter().find(|t| t.name == "ping").unwrap().annotations.as_ref().unwrap().read_only_hint,
+        Some(false)
+    );
+    let result = client.call_tool(call("ping", &json!({"target": "alpha"}))).await.unwrap();
+    assert_eq!(result.structured_content.unwrap()["result"]["pong"], "alpha");
+    assert_eq!(mock.state.act_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.state.read_hits.load(Ordering::SeqCst), 0);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn stdio_a_server_without_read_tools_offers_none() {
     let mock = Mock::start();
     mock.state.no_reads.store(true, Ordering::SeqCst);

@@ -70,22 +70,30 @@ impl Style {
     }
 }
 
-/// Unicode format characters (category Cf) and the tag block: invisible, yet able to reorder or
-/// hide text (bidi overrides, zero-width characters, tag characters that smuggle ASCII).
-const INVISIBLE: [(u32, u32); 20] = [
+/// Characters that print as nothing yet change how text reads: Unicode format characters
+/// (category Cf: bidi overrides, zero-width characters), the tag block that can smuggle ASCII,
+/// line and paragraph separators, the combining grapheme joiner, the Hangul fillers and the
+/// variation selector supplement. The zero-width joiner (U+200D) and the variation selectors
+/// U+FE00..FE0F are deliberately kept so that emoji sequences stay whole.
+const INVISIBLE: &[(u32, u32)] = &[
     (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
     (0x0600, 0x0605),
     (0x061C, 0x061C),
     (0x06DD, 0x06DD),
     (0x070F, 0x070F),
     (0x0890, 0x0891),
     (0x08E2, 0x08E2),
+    (0x115F, 0x1160),
     (0x180E, 0x180E),
-    (0x200B, 0x200F),
-    (0x202A, 0x202E),
+    (0x200B, 0x200C),
+    (0x200E, 0x200F),
+    (0x2028, 0x202E),
     (0x2060, 0x2064),
     (0x2066, 0x206F),
+    (0x3164, 0x3164),
     (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
     (0xFFF9, 0xFFFB),
     (0x110BD, 0x110BD),
     (0x110CD, 0x110CD),
@@ -93,6 +101,7 @@ const INVISIBLE: [(u32, u32); 20] = [
     (0x1BCA0, 0x1BCA3),
     (0x1D173, 0x1D17A),
     (0xE0000, 0xE007F),
+    (0xE0100, 0xE01EF),
 ];
 
 fn is_invisible(c: char) -> bool {
@@ -103,8 +112,8 @@ fn is_invisible(c: char) -> bool {
 /// Remove terminal control and invisible formatting characters from text that came from the server.
 ///
 /// C0 and C1 controls (which include the escape character and so every ANSI/OSC
-/// sequence) and DEL are dropped, and so are Unicode format characters and tag characters
-/// (bidi overrides, zero-width characters); newlines and tabs are kept.
+/// sequence) and DEL are dropped, and so are the invisible characters of [`INVISIBLE`];
+/// newlines and tabs are kept.
 pub fn sanitize(text: &str) -> String {
     text.chars().filter(|&c| matches!(c, '\n' | '\t') || !(c.is_control() || is_invisible(c))).collect()
 }
@@ -276,17 +285,37 @@ mod tests {
     }
 
     #[test]
-    fn every_range_of_the_invisible_table_is_ordered_and_all_cf_edges_are_caught() {
-        assert!(INVISIBLE.windows(2).all(|w| w[0].1 < w[1].0), "sorted and disjoint");
-        for (low, high) in INVISIBLE {
-            for code in [low, high] {
-                let c = char::from_u32(code).unwrap();
-                assert!(is_invisible(c), "U+{code:04X}");
-            }
+    fn the_invisible_table_is_sorted_and_disjoint() {
+        assert!(INVISIBLE.windows(2).all(|w| w[0].1 < w[1].0));
+    }
+
+    #[test]
+    fn the_edges_of_every_invisible_range_are_stripped_and_their_neighbours_are_not() {
+        let stripped = [
+            0x00AD, 0x034F, 0x0600, 0x0605, 0x061C, 0x06DD, 0x070F, 0x0890, 0x0891, 0x08E2, 0x115F, 0x1160,
+            0x180E, 0x200B, 0x200C, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A, 0x202E, 0x2060, 0x2064, 0x2066,
+            0x206F, 0x3164, 0xFEFF, 0xFFA0, 0xFFF9, 0xFFFB, 0x110BD, 0x110CD, 0x13430, 0x1343F, 0x1BCA0,
+            0x1BCA3, 0x1D173, 0x1D17A, 0xE0000, 0xE0001, 0xE0020, 0xE007F, 0xE0100, 0xE01EF,
+        ];
+        for code in stripped {
+            let c = char::from_u32(code).unwrap();
+            assert_eq!(sanitize(&format!("a{c}b")), "ab", "U+{code:04X}");
         }
-        for plain in ['a', ' ', '\u{ac}', '\u{ae}', '\u{200a}', '\u{2010}', '\u{e0080}'] {
-            assert!(!is_invisible(plain), "{plain:?}");
+        let kept = [
+            0x00AC, 0x00AE, 0x034E, 0x0350, 0x115E, 0x1161, 0x200A, 0x200D, 0x2027, 0x202F, 0x2065, 0x2070,
+            0x3163, 0x3165, 0xFE00, 0xFE0F, 0xFFA1, 0xFFF8, 0xFFFC, 0xE0080, 0xE00FF, 0xE01F0,
+        ];
+        for code in kept {
+            let c = char::from_u32(code).unwrap();
+            assert_eq!(sanitize(&format!("a{c}b")), format!("a{c}b"), "U+{code:04X}");
         }
+    }
+
+    #[test]
+    fn emoji_sequences_stay_whole() {
+        let family = "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let heart = "\u{2764}\u{fe0f}";
+        assert_eq!(sanitize(&format!("{family} {heart}")), format!("{family} {heart}"));
     }
 
     #[test]

@@ -865,3 +865,20 @@ fn read_errors_point_at_read_help_not_at_game_commands() {
     let plain = env.authed().args(["read", "nope"]).assert().code(2);
     assert!(String::from_utf8_lossy(&plain.get_output().stderr).contains("kargo read <tool> --help"));
 }
+
+#[test]
+fn a_read_named_like_a_command_is_skipped_and_never_marked_mcp_only() {
+    let env = Env::new();
+    env.mock.state.clash_reads.store(true, Ordering::SeqCst);
+    let tools = env.authed().arg("tools").assert().success();
+    let out = String::from_utf8_lossy(&tools.get_output().stdout).into_owned();
+    let err = String::from_utf8_lossy(&tools.get_output().stderr).into_owned();
+    assert!(out.contains("3 read tools"), "only the fixture's own reads are offered: {out}");
+    assert_eq!(out.matches("(MCP only)").count(), 1, "only `lock` is: {out}");
+    assert!(err.contains("named like a command"), "{err}");
+    for name in ["ping", "view", "help"] {
+        let failed = env.authed().args(["read", name, "--json"]).assert().code(2);
+        assert!(stderr_json(&failed)["error"].as_str().unwrap().contains(name));
+    }
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 0);
+}

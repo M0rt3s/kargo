@@ -70,13 +70,12 @@ the command line. If such a parameter is required, `kargo tools` marks the tool 
 `kargo read <tool>` exits 2 with that reason. A server that lists no reads gives `kargo read` a
 usage error; the rest works as before.
 
-Entries in `reads` are checked one by one and never make the rest of the catalogue unusable. A
-read is skipped (with the usual warning) when it is malformed, its name is unusable or repeated,
-or its path is not plain: exactly one leading `/`, and no `?`, `#`, `\`, `..` (also
-percent-encoded), or control character. A `null` or missing `reads` means none.
-
-A read named like a command or like a built-in (`view`, `help`) is not offered over MCP, where
-the command or built-in wins, but it still works with `kargo read`.
+Entries in `reads` are checked one by one, so a bad entry does not make the rest of the
+catalogue unusable (a body that is not JSON at all still fails). A read is skipped, on the CLI and
+over MCP alike and with the usual warning, when it is malformed, its name is unusable, repeated,
+or the name of a command or of a built-in tool (`view`, `help`), one of its required parameters
+has an unusable name, or its path is not plain: exactly one leading `/`, and no `?`, `#`, `\`,
+`..` (also percent-encoded), or control character. A `null` or missing `reads` means none.
 
 ## Output
 
@@ -86,9 +85,13 @@ the command or built-in wins, but it still works with `kargo read`.
   (`tools --json` writes the catalogue body byte for byte; `act`, `view` and `read` print the
   server's response). Nothing else is written to stdout.
 - Text that came from the server is stripped of terminal control characters
-  (everything except newline and tab) and of invisible formatting characters (Unicode
-  format characters such as bidi overrides and zero-width characters, and tag characters)
-  before it is printed.
+  (everything except newline and tab) and of invisible formatting characters (Unicode format
+  characters such as bidi overrides and zero-width characters, tag characters, line and
+  paragraph separators, the Hangul fillers and variation selectors U+E0100..E01EF) wherever
+  `kargo` prints or lists it: the catalogue's titles, descriptions and notes, help text, error
+  messages and the human-readable output. The zero-width joiner and the selectors U+FE00..FE0F
+  are kept so emoji stay whole. `--json` output and MCP `structuredContent` carry the server's
+  JSON unchanged.
 - A closed pipe (`kargo tools | head`) ends the run quietly with exit code 0.
 - Errors always go to stderr. With `--json` they are one object:
 
@@ -155,8 +158,7 @@ this build understands is refused with an "upgrade kargo" error.
   declare every listed parameter as `"type": "string"`, the one type every client accepts, but
   also take numbers and booleans, sent as their text (`1.0` is sent as `1`). Unlisted
   parameters, other value types and missing required ones are a `schema` tool error and nothing
-  is sent. They never wait in the per-token act queue. A read
-  tool named like `view`, `help` or a command is not offered.
+  is sent. They never wait in the per-token act queue.
   The list is refreshed when the 60 second catalogue TTL expires.
 - Results: the server JSON as `structuredContent` plus the same JSON as a text
   block. A rule refusal is `isError: true` with the server's message. Every

@@ -8,27 +8,20 @@ use serde_json::{Value, json};
 use crate::catalogue::{Catalogue, CommandSpec, ReadSpec};
 use crate::output::sanitize;
 
-/// Name of the built-in read-only state tool.
-pub const VIEW_TOOL: &str = "view";
-/// Name of the built-in rules/help tool.
-pub const HELP_TOOL: &str = "help";
+pub(super) use crate::catalogue::{HELP_TOOL, VIEW_TOOL};
 
 /// All tools for a catalogue: `view`, `help`, one per game command, then one per read tool.
 ///
 /// The two built-ins win a name clash: a catalogue command called `view` or
 /// `help` would be shadowed and is left out. A read tool named like a built-in or a command
-/// is left out too.
+/// is dropped when the catalogue is read, so read names never collide here.
 pub fn build(catalogue: &Catalogue) -> Vec<Tool> {
     let mut tools = vec![view_tool(catalogue), help_tool()];
     tools.extend(
         catalogue.commands.iter().filter(|c| c.name != VIEW_TOOL && c.name != HELP_TOOL).map(command_tool),
     );
-    tools.extend(catalogue.reads.iter().filter(|r| !is_taken(catalogue, &r.name)).map(read_tool));
+    tools.extend(catalogue.reads.iter().map(read_tool));
     tools
-}
-
-fn is_taken(catalogue: &Catalogue, name: &str) -> bool {
-    name == VIEW_TOOL || name == HELP_TOOL || catalogue.command(name).is_some()
 }
 
 fn view_tool(catalogue: &Catalogue) -> Tool {
