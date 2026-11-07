@@ -197,7 +197,12 @@ pub struct Request {
 }
 
 /// Match `raw` against a generated command tree. `Ok(None)` means help was printed.
-pub(super) fn matches(command: Command, raw: &[String], json: bool) -> Result<Option<ArgMatches>> {
+pub(super) fn matches(
+    command: Command,
+    raw: &[String],
+    json: bool,
+    missing: &str,
+) -> Result<Option<ArgMatches>> {
     match command.try_get_matches_from(raw) {
         Ok(matches) => Ok(Some(matches)),
         Err(err)
@@ -211,7 +216,7 @@ pub(super) fn matches(command: Command, raw: &[String], json: bool) -> Result<Op
                 if !json {
                     let _ = std::io::Write::write_all(&mut std::io::stderr(), text.as_bytes());
                 }
-                return Err(Error::Usage("a command is required".into()));
+                return Err(Error::Usage(missing.into()));
             }
             output::write_stdout(&text)?;
             Ok(None)
@@ -225,7 +230,9 @@ pub(super) fn matches(command: Command, raw: &[String], json: bool) -> Result<Op
 /// With `json`, nothing but the final error object may reach stderr, so help text is not echoed
 /// when a command is missing.
 pub fn parse(catalogue: &Catalogue, raw: &[String], json: bool) -> Result<Option<Request>> {
-    let Some(matches) = matches(command(catalogue), raw, json)? else { return Ok(None) };
+    let Some(matches) = matches(command(catalogue), raw, json, "a command is required")? else {
+        return Ok(None);
+    };
     let Some((name, sub)) = matches.subcommand() else {
         return Err(Error::Usage("a command is required".into()));
     };

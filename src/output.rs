@@ -70,12 +70,43 @@ impl Style {
     }
 }
 
-/// Remove terminal control characters from text that came from the server.
+/// Unicode format characters (category Cf) and the tag block: invisible, yet able to reorder or
+/// hide text (bidi overrides, zero-width characters, tag characters that smuggle ASCII).
+const INVISIBLE: [(u32, u32); 20] = [
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE007F),
+];
+
+fn is_invisible(c: char) -> bool {
+    let code = u32::from(c);
+    INVISIBLE.iter().any(|&(low, high)| (low..=high).contains(&code))
+}
+
+/// Remove terminal control and invisible formatting characters from text that came from the server.
 ///
 /// C0 and C1 controls (which include the escape character and so every ANSI/OSC
-/// sequence) and DEL are dropped; newlines and tabs are kept.
+/// sequence) and DEL are dropped, and so are Unicode format characters and tag characters
+/// (bidi overrides, zero-width characters); newlines and tabs are kept.
 pub fn sanitize(text: &str) -> String {
-    text.chars().filter(|c| matches!(c, '\n' | '\t') || !(c.is_control())).collect()
+    text.chars().filter(|&c| matches!(c, '\n' | '\t') || !(c.is_control() || is_invisible(c))).collect()
 }
 
 /// Write `text` to stdout, mapping a closed pipe to [`Error::BrokenPipe`].
@@ -93,11 +124,16 @@ pub fn print_line(text: &str) -> Result<()> {
 
 /// Format a failure for stderr: plain text, or one JSON object under `--json`.
 pub fn render_error(error: &Error, json: bool, style: Style) -> String {
+    render_error_on(error, Surface::Cli, json, style)
+}
+
+/// Like [`render_error`], with the hint written for `surface`.
+pub fn render_error_on(error: &Error, surface: Surface, json: bool, style: Style) -> String {
     if json {
-        return sanitize_json(&error.to_json(Surface::Cli)).to_string();
+        return sanitize_json(&error.to_json(surface)).to_string();
     }
     let mut out = format!("{} {}", style.red("error:"), sanitize(&error.to_string()));
-    if let Some(hint) = error.hint(Surface::Cli) {
+    if let Some(hint) = error.hint(surface) {
         let _ = write!(out, "\n{} {hint}", style.dim("hint:"));
     }
     out
@@ -230,6 +266,27 @@ mod tests {
     #[test]
     fn long_cells_are_shortened() {
         assert_eq!(shorten(&"x".repeat(100)).chars().count(), MAX_CELL);
+    }
+
+    #[test]
+    fn invisible_formatting_and_tag_characters_are_stripped_but_text_survives() {
+        let hostile = "a\u{202e}b\u{200b}c\u{feff}d\u{ad}e\u{2066}f\u{e0041}\u{e007f}g\u{1d173}h\u{600}i";
+        assert_eq!(sanitize(hostile), "abcdefghi");
+        assert_eq!(sanitize("Zaryá žluťoučký kůň \u{1f680} 日本"), "Zaryá žluťoučký kůň \u{1f680} 日本");
+    }
+
+    #[test]
+    fn every_range_of_the_invisible_table_is_ordered_and_all_cf_edges_are_caught() {
+        assert!(INVISIBLE.windows(2).all(|w| w[0].1 < w[1].0), "sorted and disjoint");
+        for (low, high) in INVISIBLE {
+            for code in [low, high] {
+                let c = char::from_u32(code).unwrap();
+                assert!(is_invisible(c), "U+{code:04X}");
+            }
+        }
+        for plain in ['a', ' ', '\u{ac}', '\u{ae}', '\u{200a}', '\u{2010}', '\u{e0080}'] {
+            assert!(!is_invisible(plain), "{plain:?}");
+        }
     }
 
     #[test]

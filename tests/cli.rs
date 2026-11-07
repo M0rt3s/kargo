@@ -700,7 +700,7 @@ fn tools_lists_the_read_tools_beside_the_commands() {
         .arg("tools")
         .assert()
         .success()
-        .stdout(predicate::str::contains("1 read tools").and(predicate::str::contains("Scout a target")));
+        .stdout(predicate::str::contains("3 read tools").and(predicate::str::contains("Scout a target")));
 }
 
 #[test]
@@ -784,4 +784,84 @@ fn a_server_without_read_tools_still_works_and_read_says_so() {
 fn a_read_without_a_token_exits_3() {
     let env = Env::new();
     env.kargo().args(["read", "scout", "--target", "x"]).assert().code(3);
+}
+
+const INVISIBLE: [char; 6] = ['\u{1b}', '\u{7}', '\u{9b}', '\u{202e}', '\u{200b}', '\u{e0041}'];
+
+#[test]
+fn hostile_read_titles_descriptions_and_notes_never_reach_the_terminal() {
+    let env = Env::new();
+    env.mock.state.hostile.store(true, Ordering::SeqCst);
+    let text_of = |assert: assert_cmd::assert::Assert| {
+        let output = assert.get_output();
+        format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+    };
+    let tools = text_of(env.authed().arg("tools").assert().success());
+    let list = text_of(env.authed().args(["read", "--help"]).assert().success());
+    let tool = text_of(env.authed().args(["read", "scout", "--help"]).assert().success());
+    for text in [&tools, &list, &tool] {
+        assert!(!text.contains(INVISIBLE), "{text:?}");
+    }
+    assert!(tools.contains("Sc[31mout"), "{tools}");
+    assert!(tool.contains("Lo]0;PWNEDok at it. Then more.") && tool.contains("Wh[2Jo"), "{tool}");
+}
+
+#[test]
+fn a_parameter_may_be_spelled_with_its_underscore() {
+    let env = Env::new();
+    env.authed().args(["read", "scout", "--target", "x", "--max_depth", "4"]).assert().success();
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query["max_depth"], "4");
+    env.authed().args(["read", "scout", "--target", "x", "--max-depth", "-5"]).assert().success();
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query["max_depth"], "-5");
+}
+
+#[test]
+fn max_wait_after_the_tool_limits_the_rate_limit_wait() {
+    let env = Env::new();
+    env.mock.state.rate_limited_reads.store(100, Ordering::SeqCst);
+    env.authed().args(["read", "scout", "--target", "x", "--max-wait", "0"]).assert().code(4);
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 1);
+    env.authed().args(["read", "scout", "--target", "x", "--max-wait", "soon"]).assert().code(2);
+}
+
+#[test]
+fn parameters_named_like_kargo_options_have_no_flag_and_do_not_clash() {
+    let env = Env::new();
+    let json = stdout_json(env.authed().args(["read", "probe", "--target", "x", "--json"]));
+    assert_eq!(json["scout"]["target"], "x");
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query.len(), 1, "--json is kargo's own flag, not the parameter: {query:?}");
+    env.authed().args(["read", "probe", "--target", "x", "--max-wait", "0"]).assert().success();
+    env.authed().args(["read", "probe", "--help"]).assert().success().stdout(
+        predicate::str::contains("Not settable from the command line")
+            .and(predicate::str::contains("json, max_wait")),
+    );
+}
+
+#[test]
+fn a_tool_whose_required_parameter_has_no_flag_is_marked_and_refused_with_a_reason() {
+    let env = Env::new();
+    env.kargo().arg("tools").assert().success().stdout(predicate::str::contains("(MCP only)"));
+    let failed = env.authed().args(["read", "lock", "--json"]).assert().code(2);
+    let error = stderr_json(&failed);
+    assert!(error["error"].as_str().unwrap().contains("use the MCP server"), "{error}");
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn read_errors_point_at_read_help_not_at_game_commands() {
+    let env = Env::new();
+    for args in
+        [&["read", "scout", "--target", "x", "--bogus", "1", "--json"][..], &["read", "nope", "--json"]]
+    {
+        let failed = env.authed().args(args).assert().code(2);
+        let hint = stderr_json(&failed)["hint"].as_str().unwrap().to_owned();
+        assert!(hint.contains("kargo read") && !hint.contains("kargo act"), "{hint}");
+    }
+    let failed = env.authed().args(["act", "nope", "--json"]).assert().code(2);
+    assert!(stderr_json(&failed)["hint"].as_str().unwrap().contains("kargo act"));
+    let plain = env.authed().args(["read", "nope"]).assert().code(2);
+    assert!(String::from_utf8_lossy(&plain.get_output().stderr).contains("kargo read <tool> --help"));
 }

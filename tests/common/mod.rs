@@ -122,9 +122,27 @@ fn reads_json() -> Value {
             "title": "Scout a target",
             "description": "Look at a target without touching it. The answer is null when it is hidden.",
             "params": [
-                {"name": "target", "required": true, "description": "What to look at"},
-                {"name": "max_depth", "required": false, "description": "How far to look"}
+                {"name": "target", "required": true, "note": "What to look at"},
+                {"name": "max_depth", "required": false, "note": "How far to look"}
             ],
+            "path": "/api/agent/scout"
+        },
+        {
+            "name": "probe",
+            "title": "Probe with clashing names",
+            "description": "Takes parameters whose flags would clash with kargo's own options.",
+            "params": [
+                {"name": "target", "required": true, "note": "What to probe"},
+                {"name": "json", "required": false, "note": "A parameter called json"},
+                {"name": "max_wait", "required": false, "note": "A parameter called max_wait"}
+            ],
+            "path": "/api/agent/scout"
+        },
+        {
+            "name": "lock",
+            "title": "Locked from the command line",
+            "description": "Needs a parameter whose flag clashes with kargo's own options.",
+            "params": [{"name": "help", "required": true, "note": "A required parameter called help"}],
             "path": "/api/agent/scout"
         }
     ])
@@ -252,6 +270,10 @@ async fn tools(State(state): State<Arc<MockState>>) -> Response {
 
 /// Terminal escape sequences in a title, an example, an enum value and a command name.
 fn hostile_catalogue(catalogue: &mut Value) {
+    let scout = &mut catalogue["reads"][0];
+    scout["title"] = json!("Sc\u{1b}[31mout\u{202e}");
+    scout["description"] = json!("Lo\u{1b}]0;PWNED\u{7}ok\u{200b} at it. Then\u{e0041} more.");
+    scout["params"][0]["note"] = json!("Wh\u{1b}[2Jo\u{202e}");
     let commands = catalogue["commands"].as_array_mut().unwrap();
     for command in commands.iter_mut() {
         match command["name"].as_str() {

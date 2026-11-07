@@ -19,7 +19,7 @@ use super::{Context, act, print_reply};
 const ARG_JSON: &str = "opt:json";
 const ARG_MAX_WAIT: &str = "opt:max-wait";
 /// Long flags owned by `kargo`; parameters with these names cannot be set from the command line.
-const RESERVED: [&str; 4] = ["help", "version", "json", "max-wait"];
+const RESERVED: [&str; 3] = ["help", "json", "max-wait"];
 
 /// Build the clap command tree for `kargo read` from the catalogue.
 pub fn command(reads: &[ReadSpec]) -> Command {
@@ -84,13 +84,18 @@ fn is_reserved(param: &str) -> bool {
     RESERVED.contains(&flag_name(param).as_str())
 }
 
+/// The required parameter that has no flag, which makes the tool unusable from the command line.
+pub fn blocked_by(spec: &ReadSpec) -> Option<&str> {
+    spec.params.iter().find(|p| p.required && is_reserved(&p.name)).map(|p| p.name.as_str())
+}
+
 fn param_id(name: &str) -> String {
     format!("param:{name}")
 }
 
 fn param_arg(param: &ReadParam) -> Arg {
     let long = flag_name(&param.name);
-    let mut help = sanitize(&param.description);
+    let mut help = sanitize(&param.note);
     if param.required {
         help = if help.is_empty() { "(required)".into() } else { format!("{help} (required)") };
     }
@@ -119,11 +124,18 @@ pub async fn run(ctx: &Context, raw: &[String]) -> Result<()> {
     if catalogue.reads.is_empty() {
         return Err(Error::Usage("the server offers no read tools".into()));
     }
-    let Some(matches) = act::matches(command(&catalogue.reads), raw, json)? else { return Ok(()) };
+    let Some(matches) = act::matches(command(&catalogue.reads), raw, json, "a read tool is required")? else {
+        return Ok(());
+    };
     let Some((name, sub)) = matches.subcommand() else {
         return Err(Error::Usage("a read tool is required".into()));
     };
     let spec = read::find(&catalogue, name)?;
+    if let Some(param) = blocked_by(spec) {
+        return Err(Error::Usage(format!(
+            "`{name}` needs the parameter `{param}`, whose flag clashes with a kargo option; use the MCP server for this tool"
+        )));
+    }
     let params: HashMap<String, String> = spec
         .params
         .iter()

@@ -107,11 +107,11 @@ pub struct ReadParam {
     /// The query parameter's name.
     pub name: String,
     /// The tool refuses a call without it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub required: bool,
     /// What the parameter means, in the server's words.
-    #[serde(default, alias = "note")]
-    pub description: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub note: String,
 }
 
 /// One read-only question the server answers with a `GET`; it never changes anything.
@@ -120,16 +120,36 @@ pub struct ReadSpec {
     /// The tool's wire name.
     pub name: String,
     /// A short human title.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub title: String,
     /// Server-authored description.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub description: String,
     /// The query parameters it takes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub params: Vec<ReadParam>,
     /// Path to `GET`.
     pub path: String,
+}
+
+/// A JSON `null` reads as the type's default.
+fn null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Whether a read's path can be joined to the base URL without surprises: one leading `/`, no
+/// query, fragment, backslash, control character or `..` (also percent-encoded).
+fn is_safe_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains(['?', '#', '\\'])
+        && !path.chars().any(char::is_control)
+        && !path.contains("..")
+        && !path.to_ascii_lowercase().contains("%2e")
 }
 
 /// The parsed catalogue.
@@ -150,9 +170,10 @@ pub struct Catalogue {
     pub view_sections: Vec<String>,
     /// All usable commands: names that are not safe to use and repeated names are dropped.
     pub commands: Vec<CommandSpec>,
-    /// All usable read tools (none from a server that offers none): names and parameters that
-    /// are not safe to use and repeated names are dropped.
-    #[serde(default)]
+    /// All usable read tools (none from a server that offers none): a malformed entry, an unsafe
+    /// path or name, an unsafe parameter name and repeated names are dropped. Read separately so
+    /// that nothing in `reads` can make the rest of the catalogue unusable.
+    #[serde(skip_deserializing)]
     pub reads: Vec<ReadSpec>,
     /// What was dropped from the server's list, in words (already safe to print).
     #[serde(skip)]
@@ -172,6 +193,7 @@ impl Catalogue {
         let mut catalogue = Self::deserialize(value)
             .map_err(|err| Error::Unexpected(format!("the catalogue is malformed: {err}")))?;
         catalogue.keep_usable();
+        catalogue.keep_reads(value.get("reads"));
         Ok(catalogue)
     }
 
@@ -194,36 +216,48 @@ impl Catalogue {
             }
             true
         });
-        self.keep_usable_reads(&mut skipped);
         self.skipped = skipped;
     }
 
-    /// The same rules for read tools and their parameters.
-    fn keep_usable_reads(&mut self, skipped: &mut Vec<String>) {
+    /// Take the read tools out of the server's `reads` value, one entry at a time: whatever cannot
+    /// be used is noted in `skipped` and left out. Absent or `null` means none.
+    fn keep_reads(&mut self, raw: Option<&Value>) {
+        let entries = match raw {
+            None | Some(Value::Null) => &[][..],
+            Some(Value::Array(entries)) => entries,
+            Some(_) => {
+                self.skipped.push("reads: not a list".into());
+                return;
+            }
+        };
         let mut seen = std::collections::HashSet::new();
-        self.reads.retain_mut(|spec| {
+        for entry in entries {
+            let label = entry.get("name").and_then(Value::as_str).map_or_else(|| "`?`".into(), quoted);
+            let Ok(mut spec) = serde_json::from_value::<ReadSpec>(entry.clone()) else {
+                self.skipped.push(format!("read {label}: malformed"));
+                continue;
+            };
             if !names::is_valid(&spec.name) {
-                skipped.push(format!("read {}: unusable name", quoted(&spec.name)));
-                return false;
+                self.skipped.push(format!("read {label}: unusable name"));
+            } else if !is_safe_path(&spec.path) {
+                self.skipped.push(format!("read {label}: unusable path"));
+            } else if !seen.insert(spec.name.clone()) {
+                self.skipped.push(format!("read {label}: repeated name"));
+            } else {
+                let mut params = std::collections::HashSet::new();
+                spec.params.retain(|param| {
+                    let usable = names::is_valid(&param.name) && params.insert(param.name.clone());
+                    if !usable {
+                        self.skipped.push(format!(
+                            "parameter {} of {label}: unusable or repeated name",
+                            quoted(&param.name)
+                        ));
+                    }
+                    usable
+                });
+                self.reads.push(spec);
             }
-            if !seen.insert(spec.name.clone()) {
-                skipped.push(format!("read {}: repeated name", quoted(&spec.name)));
-                return false;
-            }
-            let mut params = std::collections::HashSet::new();
-            let tool = quoted(&spec.name);
-            spec.params.retain(|param| {
-                let usable = names::is_valid(&param.name) && params.insert(param.name.clone());
-                if !usable {
-                    skipped.push(format!(
-                        "parameter {} of {tool}: unusable or repeated name",
-                        quoted(&param.name)
-                    ));
-                }
-                usable
-            });
-            true
-        });
+        }
     }
 
     /// Find a command by name.
@@ -400,23 +434,20 @@ mod tests {
     }
 
     #[test]
-    fn reads_parse_with_the_servers_field_names_and_tolerate_the_description_spelling() {
+    fn reads_parse_with_the_servers_field_names() {
         let mut value = sample(1);
         value["reads"] = json!([{
             "name": "scout", "title": "Scout", "description": "d", "path": "/r",
             "params": [
                 {"name": "target", "required": true, "note": "who"},
-                {"name": "depth", "description": "how far"}
+                {"name": "depth", "description": "ignored"}
             ]
         }]);
         let catalogue = Catalogue::from_value(&value).unwrap();
         let scout = catalogue.read("scout").unwrap();
         assert_eq!(scout.path, "/r");
         assert!(scout.params[0].required && !scout.params[1].required);
-        assert_eq!(
-            (scout.params[0].description.as_str(), scout.params[1].description.as_str()),
-            ("who", "how far")
-        );
+        assert_eq!((scout.params[0].note.as_str(), scout.params[1].note.as_str()), ("who", ""));
     }
 
     #[test]
@@ -435,6 +466,86 @@ mod tests {
         assert_eq!(params, ["a", "c"]);
         assert_eq!(catalogue.skipped.len(), 5);
         assert!(catalogue.skipped.iter().all(|line| !line.contains(['\u{1b}', '\u{7}'])));
+    }
+
+    #[test]
+    fn a_malformed_reads_entry_never_takes_the_catalogue_down() {
+        let bad_entries = [
+            json!({"name": "scout"}),
+            json!({"name": "scout", "path": "/r", "params": [{"name": "a", "required": "yes"}]}),
+            json!({"name": "scout", "path": "/r", "params": "a"}),
+            json!({"name": 7, "path": "/r"}),
+            json!("scout"),
+            json!(null),
+        ];
+        for entry in bad_entries {
+            let mut value = sample(1);
+            value["reads"] = json!([entry, {"name": "good_one", "path": "/ok"}]);
+            let catalogue = Catalogue::from_value(&value).unwrap();
+            assert!(catalogue.command("ping").is_some(), "{entry}");
+            let names: Vec<&str> = catalogue.reads.iter().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, ["good_one"], "{entry}");
+            assert_eq!(catalogue.skipped.len(), 1, "{entry}");
+        }
+    }
+
+    #[test]
+    fn reads_that_are_null_or_not_a_list_mean_no_read_tools() {
+        for reads in [json!(null), json!("x"), json!({"name": "scout"})] {
+            let mut value = sample(1);
+            value["reads"] = reads;
+            let catalogue = Catalogue::from_value(&value).unwrap();
+            assert!(catalogue.reads.is_empty());
+            assert!(catalogue.command("ping").is_some());
+        }
+    }
+
+    #[test]
+    fn null_fields_of_a_read_read_as_empty() {
+        let mut value = sample(1);
+        value["reads"] =
+            json!([{"name": "scout", "path": "/r", "title": null, "description": null, "params": null}]);
+        let catalogue = Catalogue::from_value(&value).unwrap();
+        assert_eq!(catalogue.reads.len(), 1);
+        assert!(catalogue.reads[0].params.is_empty() && catalogue.reads[0].title.is_empty());
+    }
+
+    #[test]
+    fn only_plain_absolute_paths_are_kept() {
+        let good = ["/api/agent/x", "/x"];
+        let bad = [
+            "x",
+            "",
+            "//evil.example/x",
+            "///x",
+            "/x?a=b",
+            "/x#f",
+            "/x\\y",
+            "/../x",
+            "/a/../x",
+            "/a..b",
+            "/%2e%2e/x",
+            "/%2E./x",
+            "/a/%2E%2e",
+            "/x\u{1b}",
+            "/x\ny",
+            "/x\u{7f}",
+        ];
+        let mut value = sample(1);
+        let entries: Vec<Value> = good
+            .iter()
+            .chain(&bad)
+            .enumerate()
+            .map(|(i, path)| json!({"name": format!("tool_{i}"), "path": path}))
+            .collect();
+        value["reads"] = json!(entries);
+        let catalogue = Catalogue::from_value(&value).unwrap();
+        let kept: Vec<&str> = catalogue.reads.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(kept, good);
+        assert_eq!(catalogue.skipped.len(), bad.len());
+        for path in bad {
+            assert!(!is_safe_path(path), "{path:?}");
+        }
     }
 
     #[test]

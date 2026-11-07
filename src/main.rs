@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 use kargo::cli::{self, ParseFailure};
-use kargo::errors::Error;
+use kargo::errors::{Error, Surface};
 use kargo::output::{self, Style};
 
 #[tokio::main]
@@ -14,21 +14,22 @@ async fn main() -> ExitCode {
         Err(ParseFailure::Info(text)) => {
             return match output::write_stdout(&text) {
                 Ok(()) | Err(Error::BrokenPipe) => ExitCode::SUCCESS,
-                Err(error) => report(&error, false),
+                Err(error) => report(&error, Surface::Cli, false),
             };
         }
-        Err(ParseFailure::Usage { error, json }) => return report(&error, json),
+        Err(ParseFailure::Usage { error, json }) => return report(&error, Surface::Cli, json),
     };
     let json = cli::wants_json(&cli);
+    let surface = cli::surface(&cli);
     match cli::run(cli).await {
         Ok(()) | Err(Error::BrokenPipe) => ExitCode::SUCCESS,
-        Err(error) => report(&error, json),
+        Err(error) => report(&error, surface, json),
     }
 }
 
 /// Print `error` on stderr (ignoring a closed stderr) and return its exit code.
-fn report(error: &Error, json: bool) -> ExitCode {
-    let line = output::render_error(error, json, Style::stderr());
+fn report(error: &Error, surface: Surface, json: bool) -> ExitCode {
+    let line = output::render_error_on(error, surface, json, Style::stderr());
     let _ = writeln!(std::io::stderr(), "{line}");
     ExitCode::from(error.status().code())
 }

@@ -55,16 +55,28 @@ object is validated against the command's schema **before** anything is sent
 
 ## How `read` works
 
-The catalogue's `reads` array lists read tools: a name, a description, parameters (a name, whether
-it is required, a description) and the path to `GET`. `kargo read --help` lists them and
+The catalogue's `reads` array lists read tools: a name, a description, parameters (a name,
+whether it is required, a `note`) and the path to `GET`. `kargo read --help` lists them and
 `kargo read <tool> --help` shows the parameters, which become flags (`--max-depth` for
-`max_depth`). A parameter the catalogue does not list, or a missing required one, is refused
-locally (exit 2). Values are sent as query parameters, percent-encoded, with the token as a bearer
-token. The server's JSON is printed as received: a refusal the server expresses as a `null` answer
-is not an error. A read is never an act and is safe to retry; it shares `view`'s rate limit, so a
-`429` is waited out like any other (see Rate limits). A parameter whose flag would clash with
-`--help`, `--json` or `--max-wait` cannot be set from the command line. A server that lists no
-reads gives `kargo read` a usage error; the rest works as before.
+`max_depth`; the underscore spelling works too). A parameter the catalogue does not list, or a
+missing required one, is refused locally (exit 2, with a hint to `kargo read <tool> --help`).
+Values are sent as query parameters, percent-encoded, with the token as a bearer token. The
+server's JSON is printed as received: a refusal the server expresses as a `null` answer is not an
+error. A read is never an act and is safe to retry; it shares `view`'s rate limit, so a `429` is
+waited out like any other (see Rate limits), and `--max-wait` works after the tool name too.
+
+A parameter whose flag would clash with `--help`, `--json` or `--max-wait` cannot be set from
+the command line. If such a parameter is required, `kargo tools` marks the tool `(MCP only)` and
+`kargo read <tool>` exits 2 with that reason. A server that lists no reads gives `kargo read` a
+usage error; the rest works as before.
+
+Entries in `reads` are checked one by one and never make the rest of the catalogue unusable. A
+read is skipped (with the usual warning) when it is malformed, its name is unusable or repeated,
+or its path is not plain: exactly one leading `/`, and no `?`, `#`, `\`, `..` (also
+percent-encoded), or control character. A `null` or missing `reads` means none.
+
+A read named like a command or like a built-in (`view`, `help`) is not offered over MCP, where
+the command or built-in wins, but it still works with `kargo read`.
 
 ## Output
 
@@ -74,7 +86,9 @@ reads gives `kargo read` a usage error; the rest works as before.
   (`tools --json` writes the catalogue body byte for byte; `act`, `view` and `read` print the
   server's response). Nothing else is written to stdout.
 - Text that came from the server is stripped of terminal control characters
-  (everything except newline and tab) before it is printed.
+  (everything except newline and tab) and of invisible formatting characters (Unicode
+  format characters such as bidi overrides and zero-width characters, and tag characters)
+  before it is printed.
 - A closed pipe (`kargo tools | head`) ends the run quietly with exit code 0.
 - Errors always go to stderr. With `--json` they are one object:
 
@@ -138,8 +152,10 @@ this build understands is refused with an "upgrade kargo" error.
 - Tools: `view` (with a `section` enum), `help`, one tool per catalogue
   command, with the server's title, description, input schema and annotations, and one
   read-only tool per catalogue read (`readOnlyHint`, idempotent, not destructive). Read tools
-  take string, number or boolean arguments for the listed parameters only; anything else is a
-  `schema` tool error and nothing is sent. They never wait in the per-token act queue. A read
+  declare every listed parameter as `"type": "string"`, the one type every client accepts, but
+  also take numbers and booleans, sent as their text (`1.0` is sent as `1`). Unlisted
+  parameters, other value types and missing required ones are a `schema` tool error and nothing
+  is sent. They never wait in the per-token act queue. A read
   tool named like `view`, `help` or a command is not offered.
   The list is refreshed when the 60 second catalogue TTL expires.
 - Results: the server JSON as `structuredContent` plus the same JSON as a text

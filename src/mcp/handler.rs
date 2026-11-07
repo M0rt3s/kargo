@@ -261,7 +261,7 @@ async fn read(
     for (name, value) in arguments {
         let text = match value {
             Value::String(text) => text.clone(),
-            Value::Number(number) => number.to_string(),
+            Value::Number(number) => number_text(number),
             Value::Bool(flag) => flag.to_string(),
             _ => {
                 return Err(Error::Schema(format!(
@@ -274,6 +274,16 @@ async fn read(
     }
     let reply = read::fetch(client, spec, &params).await?;
     Ok(structured(&reply.json()?))
+}
+
+/// A number as a query value: a whole number is sent without a fraction (`1.0` is `1`).
+fn number_text(number: &serde_json::Number) -> String {
+    match number.as_f64() {
+        Some(float) if number.is_f64() && float.fract() == 0.0 && float.abs() < 1e15 => {
+            format!("{float:.0}")
+        }
+        _ => number.to_string(),
+    }
 }
 
 /// The server JSON as `structuredContent` plus the same JSON as a text block.
@@ -367,6 +377,16 @@ mod tests {
         for error in protocol_faults {
             assert!(!is_tool_level(&error), "{error:?} must be a JSON-RPC error");
         }
+    }
+
+    #[test]
+    fn whole_number_floats_are_sent_without_a_fraction() {
+        let text = |value: &str| number_text(&serde_json::from_str(value).unwrap());
+        assert_eq!(text("1.0"), "1");
+        assert_eq!(text("-3.0"), "-3");
+        assert_eq!(text("0.0"), "0");
+        assert_eq!(text("7"), "7");
+        assert_eq!(text("1.5"), "1.5");
     }
 
     #[test]

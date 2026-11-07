@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::api::{Client, Reply};
 use crate::catalogue::{Catalogue, DiskCache};
 use crate::config::{self, DEFAULT_URL, ENV_CACHE_DIR, ENV_CONFIG_DIR, ENV_TOKEN, ENV_URL, Paths};
-use crate::errors::{Error, ExitStatus, Result};
+use crate::errors::{Error, ExitStatus, Result, Surface};
 use crate::output::{self, Style};
 use crate::serve::ServeOptions;
 
@@ -222,6 +222,14 @@ where
     }
 }
 
+/// Where this invocation's errors are shown, which decides what their hints point at.
+pub fn surface(cli: &Cli) -> Surface {
+    match cli.command {
+        Cmd::Read(_) => Surface::CliRead,
+        _ => Surface::Cli,
+    }
+}
+
 /// Whether failures of this invocation should be reported as JSON.
 pub fn wants_json(cli: &Cli) -> bool {
     cli.json
@@ -296,7 +304,8 @@ async fn tools(ctx: &Context) -> Result<()> {
         .map(|r| {
             let summary =
                 if r.title.is_empty() { r.description.lines().next().unwrap_or("") } else { &r.title };
-            (r.name.clone(), summary.to_owned())
+            let marker = if read::blocked_by(r).is_some() { " (MCP only)" } else { "" };
+            (r.name.clone(), format!("{summary}{marker}"))
         })
         .collect();
     output::print_line(&style.dim(&format!("{} read tools", reads.len())))?;

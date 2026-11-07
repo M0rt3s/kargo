@@ -70,14 +70,14 @@ fn command_tool(spec: &CommandSpec) -> Tool {
     )
 }
 
-/// A read tool: every listed parameter is a scalar, sent as a query value.
+/// A read tool: every listed parameter is a query value, declared as a string (the one type every
+/// client accepts); numbers and booleans are still taken and sent as their text.
 fn read_tool(spec: &ReadSpec) -> Tool {
     let properties: JsonObject = spec
         .params
         .iter()
         .map(|p| {
-            let schema =
-                json!({ "type": ["string", "number", "boolean"], "description": sanitize(&p.description) });
+            let schema = json!({ "type": "string", "description": sanitize(&p.note) });
             (p.name.clone(), schema)
         })
         .collect();
@@ -171,7 +171,7 @@ mod tests {
             "commands": [{"name": "ping", "input_schema": {"type": "object"}}],
             "reads": [
                 {"name": "scout", "title": "Scout", "description": "d", "path": "/r",
-                 "params": [{"name": "target", "required": true, "description": "who"}, {"name": "depth"}]},
+                 "params": [{"name": "target", "required": true, "note": "who"}, {"name": "depth"}]},
                 {"name": "ping", "path": "/p"},
                 {"name": "help", "path": "/q"}
             ]
@@ -197,6 +197,7 @@ mod tests {
         assert_eq!(scout.input_schema["required"], json!(["target"]));
         assert_eq!(scout.input_schema["additionalProperties"], json!(false));
         assert_eq!(scout.input_schema["properties"]["target"]["description"], "who");
+        assert_eq!(scout.input_schema["properties"]["target"]["type"], "string");
         assert!(scout.input_schema["properties"].get("depth").is_some());
     }
 
