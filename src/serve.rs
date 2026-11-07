@@ -351,6 +351,7 @@ fn shutdown_signal() -> Result<impl Future<Output = ()> + Send + 'static> {
 
 /// The future ends on the first Ctrl-C.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // The same signature as on Unix, where registering can fail.
 fn shutdown_signal() -> Result<impl Future<Output = ()> + Send + 'static> {
     Ok(async {
         let _ = tokio::signal::ctrl_c().await;
