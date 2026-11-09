@@ -22,7 +22,14 @@ in the server's own words.
 From source (Rust 1.88 or newer):
 
 ```sh
-cargo install voidkargo-cli
+cargo install --locked --git https://github.com/M0rt3s/kargo
+```
+
+With four build jobs the compile needs about 2 GB of free memory. On a smaller
+machine build one crate at a time; that fits in 1 GB and takes longer:
+
+```sh
+cargo install --locked --git https://github.com/M0rt3s/kargo -j 1
 ```
 
 Prebuilt installers (shell, PowerShell, Homebrew, npm) are configured with
