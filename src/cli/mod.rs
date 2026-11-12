@@ -2,6 +2,7 @@
 
 mod act;
 mod auth;
+mod read;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -14,7 +15,7 @@ use serde_json::Value;
 use crate::api::{Client, Reply};
 use crate::catalogue::{Catalogue, DiskCache};
 use crate::config::{self, DEFAULT_URL, ENV_CACHE_DIR, ENV_CONFIG_DIR, ENV_TOKEN, ENV_URL, Paths};
-use crate::errors::{Error, ExitStatus, Result};
+use crate::errors::{Error, ExitStatus, Result, Surface};
 use crate::output::{self, Style};
 use crate::serve::ServeOptions;
 
@@ -26,9 +27,10 @@ Command-line client and MCP server for voidkargo (https://voidkargo.com).
 kargo is a generic client: every command, field and rule comes from the game \
 server's catalogue at run time, so it is always current. Start with \
 `kargo tools` to see what exists, `kargo help` to read the rules, `kargo view` \
-to look at the world, and `kargo act <command> ...` to do something.
+to look at the world, `kargo read <tool> ...` to ask a question, and \
+`kargo act <command> ...` to do something.
 
-Output is for people by default. For `tools`, `view` and `act`, --json prints \
+Output is for people by default. For `tools`, `view`, `read` and `act`, --json prints \
 exactly the server's JSON on stdout; with --json every error is one JSON object \
 on stderr ({\"error\", \"kind\", \"hint\"?}). Exit codes are stable, see below.";
 
@@ -40,7 +42,7 @@ pub struct Cli {
     #[arg(long, global = true, env = ENV_URL, default_value = DEFAULT_URL, value_name = "URL")]
     pub url: String,
 
-    /// Machine-readable output: the server's JSON on stdout (tools, view, act); errors as JSON on stderr.
+    /// Machine-readable output: the server's JSON on stdout (tools, view, read, act); errors as JSON on stderr.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -66,6 +68,9 @@ pub enum Cmd {
         #[arg(long, value_name = "SECTION")]
         section: Option<String>,
     },
+    /// Ask the game a question: `kargo read <tool> [--<param> <value> ...]`
+    #[command(disable_help_flag = true)]
+    Read(ReadArgs),
     /// Send a game command: `kargo act <command> [--<field> <value> ...]`
     #[command(disable_help_flag = true)]
     Act(ActArgs),
@@ -88,6 +93,14 @@ pub enum Cmd {
 pub struct ActArgs {
     /// COMMAND followed by its flags; `kargo act --help` lists the commands
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND [FLAGS]")]
+    pub raw: Vec<String>,
+}
+
+/// Raw arguments of `kargo read`; interpreted against the catalogue.
+#[derive(Debug, clap::Args)]
+pub struct ReadArgs {
+    /// TOOL followed by its flags; `kargo read --help` lists the tools
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "TOOL [FLAGS]")]
     pub raw: Vec<String>,
 }
 
@@ -209,11 +222,20 @@ where
     }
 }
 
+/// Where this invocation's errors are shown, which decides what their hints point at.
+pub fn surface(cli: &Cli) -> Surface {
+    match cli.command {
+        Cmd::Read(_) => Surface::CliRead,
+        _ => Surface::Cli,
+    }
+}
+
 /// Whether failures of this invocation should be reported as JSON.
 pub fn wants_json(cli: &Cli) -> bool {
     cli.json
         || match &cli.command {
             Cmd::Act(args) => act::wants_json(&args.raw),
+            Cmd::Read(args) => act::wants_json(&args.raw),
             _ => false,
         }
 }
@@ -236,6 +258,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Cmd::Tools => tools(&ctx).await,
                 Cmd::Help => help(&ctx).await,
                 Cmd::View { section } => view(&ctx, section.as_deref()).await,
+                Cmd::Read(args) => read::run(&ctx, &args.raw).await,
                 Cmd::Act(args) => act::run(&ctx, &args.raw).await,
                 Cmd::Mcp => crate::mcp::run_stdio(ctx.client).await,
                 Cmd::Auth(cmd) => auth::run(&ctx, &cmd).await,
@@ -271,7 +294,23 @@ async fn tools(ctx: &Context) -> Result<()> {
         format!("{} commands, game version {}", rows.len(), output::sanitize(&catalogue.game_version));
     output::print_line(&style.dim(&header))?;
     output::print_line(&output::render_list(&rows, style))?;
-    output::print_line(&style.dim("Details and fields: kargo act <command> --help"))
+    output::print_line(&style.dim("Details and fields: kargo act <command> --help"))?;
+    if catalogue.reads.is_empty() {
+        return Ok(());
+    }
+    let reads: Vec<(String, String)> = catalogue
+        .reads
+        .iter()
+        .map(|r| {
+            let summary =
+                if r.title.is_empty() { r.description.lines().next().unwrap_or("") } else { &r.title };
+            let marker = if read::blocked_by(r).is_some() { " (MCP only)" } else { "" };
+            (r.name.clone(), format!("{summary}{marker}"))
+        })
+        .collect();
+    output::print_line(&style.dim(&format!("{} read tools", reads.len())))?;
+    output::print_line(&output::render_list(&reads, style))?;
+    output::print_line(&style.dim("Details and parameters: kargo read <tool> --help"))
 }
 
 async fn help(ctx: &Context) -> Result<()> {

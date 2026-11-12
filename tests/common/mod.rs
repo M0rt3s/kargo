@@ -1,7 +1,8 @@
 //! An in-process mock game server with made-up fixture commands.
 //!
-//! It implements only the HTTP contract (catalogue, help, view, act). The
-//! commands (`ping`, `rename`, `toggle`, `peek`, ...) are invented for these tests.
+//! It implements only the HTTP contract (catalogue, help, view, read, act). The
+//! commands (`ping`, `rename`, `toggle`, `peek`, ...) and the read tool `scout` are invented for
+//! these tests.
 
 #![allow(
     dead_code,
@@ -39,6 +40,14 @@ pub struct MockState {
     pub act_hits: AtomicUsize,
     /// How many upcoming act calls answer 429.
     pub rate_limited_acts: AtomicUsize,
+    /// How many upcoming read calls answer 429.
+    pub rate_limited_reads: AtomicUsize,
+    pub read_hits: AtomicUsize,
+    pub last_read_query: Mutex<Option<std::collections::HashMap<String, String>>>,
+    /// Serve the catalogue of a server that lists no read tools: no `reads` key at all.
+    pub no_reads: std::sync::atomic::AtomicBool,
+    /// List reads named like a command and like the built-in tools.
+    pub clash_reads: std::sync::atomic::AtomicBool,
     pub retry_after: Mutex<String>,
     pub last_authorization: Mutex<Option<String>>,
     pub last_act_body: Mutex<Option<Value>>,
@@ -71,6 +80,7 @@ impl Mock {
             .route("/api/agent/tools", get(tools))
             .route("/api/agent/help", get(help))
             .route("/api/agent/view", get(view))
+            .route("/api/agent/scout", get(scout))
             .route("/api/agent/act", post(act))
             .route("/api/agent/whoami", get(whoami))
             .with_state(Arc::clone(&state));
@@ -106,6 +116,40 @@ impl Drop for Mock {
     }
 }
 
+/// The read tools the fixture server lists.
+fn reads_json() -> Value {
+    json!([
+        {
+            "name": "scout",
+            "title": "Scout a target",
+            "description": "Look at a target without touching it. The answer is null when it is hidden.",
+            "params": [
+                {"name": "target", "required": true, "note": "What to look at"},
+                {"name": "max_depth", "required": false, "note": "How far to look"}
+            ],
+            "path": "/api/agent/scout"
+        },
+        {
+            "name": "probe",
+            "title": "Probe with clashing names",
+            "description": "Takes parameters whose flags would clash with kargo's own options.",
+            "params": [
+                {"name": "target", "required": true, "note": "What to probe"},
+                {"name": "json", "required": false, "note": "A parameter called json"},
+                {"name": "max_wait", "required": false, "note": "A parameter called max_wait"}
+            ],
+            "path": "/api/agent/scout"
+        },
+        {
+            "name": "lock",
+            "title": "Locked from the command line",
+            "description": "Needs a parameter whose flag clashes with kargo's own options.",
+            "params": [{"name": "help", "required": true, "note": "A required parameter called help"}],
+            "path": "/api/agent/scout"
+        }
+    ])
+}
+
 pub fn catalogue_json(schema_version: u64) -> Value {
     json!({
         "schema_version": schema_version,
@@ -113,6 +157,7 @@ pub fn catalogue_json(schema_version: u64) -> Value {
         "endpoints": {"view": "/api/agent/view", "act": "/api/agent/act", "help": "/api/agent/help"},
         "limits": {"act_gap_ms": 1234, "read_gap_ms": 567},
         "view_sections": ["alpha", "beta"],
+        "reads": reads_json(),
         "commands": [
             {
                 "name": "ping",
@@ -208,6 +253,16 @@ async fn tools(State(state): State<Arc<MockState>>) -> Response {
     state.catalogue_hits.fetch_add(1, Ordering::SeqCst);
     let version = state.schema_version.lock().unwrap().unwrap_or(1);
     let mut catalogue = catalogue_json(version);
+    if state.no_reads.load(Ordering::SeqCst) {
+        catalogue.as_object_mut().unwrap().remove("reads");
+    }
+    if state.clash_reads.load(Ordering::SeqCst) {
+        let reads = catalogue["reads"].as_array_mut().unwrap();
+        for name in ["ping", "view", "help"] {
+            let param = json!({"name": "json", "required": true, "note": "x"});
+            reads.push(json!({"name": name, "params": [param], "path": "/api/agent/scout"}));
+        }
+    }
     if state.hostile.load(Ordering::SeqCst) {
         hostile_catalogue(&mut catalogue);
     }
@@ -224,6 +279,10 @@ async fn tools(State(state): State<Arc<MockState>>) -> Response {
 
 /// Terminal escape sequences in a title, an example, an enum value and a command name.
 fn hostile_catalogue(catalogue: &mut Value) {
+    let scout = &mut catalogue["reads"][0];
+    scout["title"] = json!("Sc\u{1b}[31mout\u{202e}");
+    scout["description"] = json!("Lo\u{1b}]0;PWNED\u{7}ok\u{200b} at it. Then\u{e0041} more.");
+    scout["params"][0]["note"] = json!("Wh\u{1b}[2Jo\u{202e}");
     let commands = catalogue["commands"].as_array_mut().unwrap();
     for command in commands.iter_mut() {
         match command["name"].as_str() {
@@ -322,6 +381,31 @@ async fn view(
         .into_response();
     }
     Json(json!({"section": section, "items": [{"id": 1, "name": "one"}, {"id": 2, "name": "two"}]}))
+        .into_response()
+}
+
+/// The invented read tool: `{"scout": null}` for a hidden target, else the query echoed back.
+async fn scout(
+    State(state): State<Arc<MockState>>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    state.read_hits.fetch_add(1, Ordering::SeqCst);
+    let pending = state.rate_limited_reads.load(Ordering::SeqCst);
+    if pending > 0 {
+        state.rate_limited_reads.fetch_sub(1, Ordering::SeqCst);
+        let retry_after = state.retry_after.lock().unwrap().clone();
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, retry_after)], "slow down")
+            .into_response();
+    }
+    if let Err(response) = authorize(&state, &headers) {
+        return response;
+    }
+    *state.last_read_query.lock().unwrap() = Some(query.clone());
+    if query.get("target").map(String::as_str) == Some("hidden") {
+        return Json(json!({"scout": null})).into_response();
+    }
+    Json(json!({"scout": {"target": query.get("target"), "max_depth": query.get("max_depth")}}))
         .into_response()
 }
 

@@ -18,6 +18,7 @@ pub mod errors;
 pub(crate) mod mcp;
 pub(crate) mod names;
 pub mod output;
+pub(crate) mod read;
 pub(crate) mod schema;
 pub mod serve;
 #[cfg(test)]

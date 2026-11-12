@@ -12,22 +12,24 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 
 use crate::act::{self, Outcome};
 use crate::api::Client;
 use crate::cache::SwrCache;
-use crate::catalogue::{CACHE_TTL, Catalogue, MemoryCache};
+use crate::catalogue::{CACHE_TTL, Catalogue, MemoryCache, ReadSpec};
 use crate::errors::{Error, Surface, describe_duration};
 use crate::output::{sanitize, sanitize_json};
+use crate::read;
 use crate::verifier::TokenVerifier;
 
 use super::gate::{ActGate, DEFAULT_QUEUE};
 use super::tools::{self, HELP_TOOL, VIEW_TOOL};
 
 const INSTRUCTIONS: &str = "Tools mirror the game server's own catalogue. Call `help` first to read how the \
-game works, `view` to look at the current state, then use the command tools to act. Commands are paced by \
+game works, `view` to look at the current state, the read tools to ask questions, then use the command tools to act. Commands are paced by \
 the server; if one is refused, the message says why.";
 
 /// Where the game API token comes from.
@@ -153,6 +155,9 @@ impl KargoMcp {
             }
             name => {
                 if catalogue.command(name).is_none() {
+                    if let Some(spec) = catalogue.read(name) {
+                        return Ok(self.within(read(&client, spec, &arguments)).await?);
+                    }
                     return Err(Failure::UnknownTool(name.to_owned()));
                 }
                 let turn = self.gate.enter(token.as_deref(), deadline).await?;
@@ -246,6 +251,41 @@ async fn view(
     Ok(structured(&reply.json()?))
 }
 
+/// Ask a read tool. It rides the read allowance, never the act gate, and a repeat changes nothing.
+async fn read(
+    client: &Client,
+    spec: &ReadSpec,
+    arguments: &Map<String, Value>,
+) -> Result<CallToolResult, Error> {
+    let mut params = HashMap::new();
+    for (name, value) in arguments {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number_text(number),
+            Value::Bool(flag) => flag.to_string(),
+            _ => {
+                return Err(Error::Schema(format!(
+                    "`{}` must be a string, number or boolean",
+                    sanitize(name)
+                )));
+            }
+        };
+        params.insert(name.clone(), text);
+    }
+    let reply = read::fetch(client, spec, &params).await?;
+    Ok(structured(&reply.json()?))
+}
+
+/// A number as a query value: a whole number is sent without a fraction (`1.0` is `1`).
+fn number_text(number: &serde_json::Number) -> String {
+    match number.as_f64() {
+        Some(float) if number.is_f64() && float.fract() == 0.0 && float.abs() < 1e15 => {
+            format!("{float:.0}")
+        }
+        _ => number.to_string(),
+    }
+}
+
 /// The server JSON as `structuredContent` plus the same JSON as a text block.
 fn structured(value: &Value) -> CallToolResult {
     CallToolResult::structured(as_object(value))
@@ -337,6 +377,16 @@ mod tests {
         for error in protocol_faults {
             assert!(!is_tool_level(&error), "{error:?} must be a JSON-RPC error");
         }
+    }
+
+    #[test]
+    fn whole_number_floats_are_sent_without_a_fraction() {
+        let text = |value: &str| number_text(&serde_json::from_str(value).unwrap());
+        assert_eq!(text("1.0"), "1");
+        assert_eq!(text("-3.0"), "-3");
+        assert_eq!(text("0.0"), "0");
+        assert_eq!(text("7"), "7");
+        assert_eq!(text("1.5"), "1.5");
     }
 
     #[test]

@@ -692,3 +692,193 @@ fn a_sent_command_answered_by_anything_but_the_games_verdict_is_unknown_exit_9()
     let assert = env.authed().args(["act", "ping", "--target", "down503", "--json"]).assert().code(6);
     assert_eq!(stderr_json(&assert)["kind"], "unavailable", "a 503 means the game is down");
 }
+
+#[test]
+fn tools_lists_the_read_tools_beside_the_commands() {
+    let env = Env::new();
+    env.kargo()
+        .arg("tools")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3 read tools").and(predicate::str::contains("Scout a target")));
+}
+
+#[test]
+fn read_sends_the_parameters_with_the_token_and_prints_the_reply() {
+    let env = Env::new();
+    let json =
+        stdout_json(env.authed().args(["read", "scout", "--target", "alpha", "--max-depth", "3", "--json"]));
+    assert_eq!(json, json!({"scout": {"target": "alpha", "max_depth": "3"}}));
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!((query["target"].as_str(), query["max_depth"].as_str()), ("alpha", "3"));
+    assert_eq!(
+        env.mock.state.last_authorization.lock().unwrap().as_deref(),
+        Some(format!("Bearer {GOOD_TOKEN}").as_str())
+    );
+    assert_eq!(env.mock.state.act_hits.load(Ordering::SeqCst), 0, "a read is never an act");
+    env.authed()
+        .args(["read", "scout", "--target", "alpha"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alpha"));
+}
+
+#[test]
+fn read_values_are_percent_encoded_not_concatenated() {
+    let env = Env::new();
+    let tricky = "a b&c=d#e?f%20é";
+    env.authed().args(["read", "scout", "--target", tricky]).assert().success();
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query.len(), 1, "no parameter may be smuggled in: {query:?}");
+    assert_eq!(query["target"], tricky);
+}
+
+#[test]
+fn a_refused_read_is_the_servers_null_reply_and_not_an_error() {
+    let env = Env::new();
+    let json = stdout_json(env.authed().args(["read", "scout", "--target", "hidden", "--json"]));
+    assert_eq!(json, json!({"scout": null}));
+}
+
+#[test]
+fn read_refuses_unknown_and_missing_parameters_before_sending() {
+    let env = Env::new();
+    let failed =
+        env.authed().args(["read", "scout", "--target", "x", "--bogus", "1", "--json"]).assert().code(2);
+    assert_eq!(stderr_json(&failed)["kind"], "usage");
+    env.authed().args(["read", "scout"]).assert().code(2);
+    env.authed().args(["read", "nope"]).assert().code(2);
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn read_waits_out_a_rate_limit_then_retries() {
+    let env = Env::new();
+    env.mock.state.rate_limited_reads.store(1, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    env.authed().args(["read", "scout", "--target", "x"]).assert().success();
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1), "must honour Retry-After");
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(env.mock.state.act_hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn persistent_rate_limiting_of_a_read_exits_4() {
+    let env = Env::new();
+    env.mock.state.rate_limited_reads.store(100, Ordering::SeqCst);
+    env.authed().args(["--max-wait", "0", "read", "scout", "--target", "x"]).assert().code(4);
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_server_without_read_tools_still_works_and_read_says_so() {
+    let env = Env::new();
+    env.mock.state.no_reads.store(true, Ordering::SeqCst);
+    env.authed().args(["act", "peek"]).assert().success();
+    env.kargo().arg("tools").assert().success().stdout(predicate::str::contains("read tools").not());
+    let failed = env.authed().args(["read", "scout", "--target", "x", "--json"]).assert().code(2);
+    assert!(stderr_json(&failed)["error"].as_str().unwrap().contains("no read tools"));
+}
+
+#[test]
+fn a_read_without_a_token_exits_3() {
+    let env = Env::new();
+    env.kargo().args(["read", "scout", "--target", "x"]).assert().code(3);
+}
+
+const INVISIBLE: [char; 6] = ['\u{1b}', '\u{7}', '\u{9b}', '\u{202e}', '\u{200b}', '\u{e0041}'];
+
+#[test]
+fn hostile_read_titles_descriptions_and_notes_never_reach_the_terminal() {
+    let env = Env::new();
+    env.mock.state.hostile.store(true, Ordering::SeqCst);
+    let text_of = |assert: assert_cmd::assert::Assert| {
+        let output = assert.get_output();
+        format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+    };
+    let tools = text_of(env.authed().arg("tools").assert().success());
+    let list = text_of(env.authed().args(["read", "--help"]).assert().success());
+    let tool = text_of(env.authed().args(["read", "scout", "--help"]).assert().success());
+    for text in [&tools, &list, &tool] {
+        assert!(!text.contains(INVISIBLE), "{text:?}");
+    }
+    assert!(tools.contains("Sc[31mout"), "{tools}");
+    assert!(tool.contains("Lo]0;PWNEDok at it. Then more.") && tool.contains("Wh[2Jo"), "{tool}");
+}
+
+#[test]
+fn a_parameter_may_be_spelled_with_its_underscore() {
+    let env = Env::new();
+    env.authed().args(["read", "scout", "--target", "x", "--max_depth", "4"]).assert().success();
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query["max_depth"], "4");
+    env.authed().args(["read", "scout", "--target", "x", "--max-depth", "-5"]).assert().success();
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query["max_depth"], "-5");
+}
+
+#[test]
+fn max_wait_after_the_tool_limits_the_rate_limit_wait() {
+    let env = Env::new();
+    env.mock.state.rate_limited_reads.store(100, Ordering::SeqCst);
+    env.authed().args(["read", "scout", "--target", "x", "--max-wait", "0"]).assert().code(4);
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 1);
+    env.authed().args(["read", "scout", "--target", "x", "--max-wait", "soon"]).assert().code(2);
+}
+
+#[test]
+fn parameters_named_like_kargo_options_have_no_flag_and_do_not_clash() {
+    let env = Env::new();
+    let json = stdout_json(env.authed().args(["read", "probe", "--target", "x", "--json"]));
+    assert_eq!(json["scout"]["target"], "x");
+    let query = env.mock.state.last_read_query.lock().unwrap().clone().unwrap();
+    assert_eq!(query.len(), 1, "--json is kargo's own flag, not the parameter: {query:?}");
+    env.authed().args(["read", "probe", "--target", "x", "--max-wait", "0"]).assert().success();
+    env.authed().args(["read", "probe", "--help"]).assert().success().stdout(
+        predicate::str::contains("Not settable from the command line")
+            .and(predicate::str::contains("json, max_wait")),
+    );
+}
+
+#[test]
+fn a_tool_whose_required_parameter_has_no_flag_is_marked_and_refused_with_a_reason() {
+    let env = Env::new();
+    env.kargo().arg("tools").assert().success().stdout(predicate::str::contains("(MCP only)"));
+    let failed = env.authed().args(["read", "lock", "--json"]).assert().code(2);
+    let error = stderr_json(&failed);
+    assert!(error["error"].as_str().unwrap().contains("use the MCP server"), "{error}");
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn read_errors_point_at_read_help_not_at_game_commands() {
+    let env = Env::new();
+    for args in
+        [&["read", "scout", "--target", "x", "--bogus", "1", "--json"][..], &["read", "nope", "--json"]]
+    {
+        let failed = env.authed().args(args).assert().code(2);
+        let hint = stderr_json(&failed)["hint"].as_str().unwrap().to_owned();
+        assert!(hint.contains("kargo read") && !hint.contains("kargo act"), "{hint}");
+    }
+    let failed = env.authed().args(["act", "nope", "--json"]).assert().code(2);
+    assert!(stderr_json(&failed)["hint"].as_str().unwrap().contains("kargo act"));
+    let plain = env.authed().args(["read", "nope"]).assert().code(2);
+    assert!(String::from_utf8_lossy(&plain.get_output().stderr).contains("kargo read <tool> --help"));
+}
+
+#[test]
+fn a_read_named_like_a_command_is_skipped_and_never_marked_mcp_only() {
+    let env = Env::new();
+    env.mock.state.clash_reads.store(true, Ordering::SeqCst);
+    let tools = env.authed().arg("tools").assert().success();
+    let out = String::from_utf8_lossy(&tools.get_output().stdout).into_owned();
+    let err = String::from_utf8_lossy(&tools.get_output().stderr).into_owned();
+    assert!(out.contains("3 read tools"), "only the fixture's own reads are offered: {out}");
+    assert_eq!(out.matches("(MCP only)").count(), 1, "only `lock` is: {out}");
+    assert!(err.contains("named like a command"), "{err}");
+    for name in ["ping", "view", "help"] {
+        let failed = env.authed().args(["read", name, "--json"]).assert().code(2);
+        assert!(stderr_json(&failed)["error"].as_str().unwrap().contains(name));
+    }
+    assert_eq!(env.mock.state.read_hits.load(Ordering::SeqCst), 0);
+}

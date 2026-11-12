@@ -4,6 +4,8 @@
 kargo tools [--json]                  list commands from the server's catalogue
 kargo help                            the server's help text
 kargo view [--section <s>] [--json]   game state; sections come from the catalogue
+kargo read <tool> [--<param> <value> ...] [--json]
+                                      ask a read tool the catalogue lists; never an act
 kargo act <command> [--<field> <value> ...] [--note <text>] [--json]
 kargo act <command> --input '<json>'  the same, with the fields as raw JSON
 kargo auth login | logout | status
@@ -15,7 +17,7 @@ kargo completions <shell>
 ```
 
 Global flags: `--url <URL>` (env `KARGO_URL`), `--json`, `--max-wait <SECS>`
-(default 10). `--json` applies to `tools`, `view`, `act` and `auth`; `kargo help`
+(default 10). `--json` applies to `tools`, `view`, `read`, `act` and `auth`; `kargo help`
 prints the server's text either way.
 
 Command and field names from the catalogue must match `^[a-z][a-z0-9_]{0,63}$`.
@@ -51,15 +53,45 @@ object is validated against the command's schema **before** anything is sent
 { "command": { "command": "<name>", "...fields": "..." }, "note": "optional" }
 ```
 
+## How `read` works
+
+The catalogue's `reads` array lists read tools: a name, a description, parameters (a name,
+whether it is required, a `note`) and the path to `GET`. `kargo read --help` lists them and
+`kargo read <tool> --help` shows the parameters, which become flags (`--max-depth` for
+`max_depth`; the underscore spelling works too). A parameter the catalogue does not list, or a
+missing required one, is refused locally (exit 2, with a hint to `kargo read <tool> --help`).
+Values are sent as query parameters, percent-encoded, with the token as a bearer token. The
+server's JSON is printed as received: a refusal the server expresses as a `null` answer is not an
+error. A read is never an act and is safe to retry; it shares `view`'s rate limit, so a `429` is
+waited out like any other (see Rate limits), and `--max-wait` works after the tool name too.
+
+A parameter whose flag would clash with `--help`, `--json` or `--max-wait` cannot be set from
+the command line. If such a parameter is required, `kargo tools` marks the tool `(MCP only)` and
+`kargo read <tool>` exits 2 with that reason. A server that lists no reads gives `kargo read` a
+usage error; the rest works as before.
+
+Entries in `reads` are checked one by one, so a bad entry does not make the rest of the
+catalogue unusable (a body that is not JSON at all still fails). A read is skipped, on the CLI and
+over MCP alike and with the usual warning, when it is malformed, its name is unusable, repeated,
+or the name of a command or of a built-in tool (`view`, `help`), one of its required parameters
+has an unusable name, or its path is not plain: exactly one leading `/`, and no `?`, `#`, `\`,
+`..` (also percent-encoded), or control character. A `null` or missing `reads` means none.
+
 ## Output
 
 - Default: compact, human-readable. Colour only on a terminal or with
   `CLICOLOR_FORCE`, and never when `NO_COLOR` is set (`NO_COLOR` wins).
 - `--json`: stdout carries exactly the server's JSON for successful calls
-  (`tools --json` writes the catalogue body byte for byte; `act` and `view` print the
+  (`tools --json` writes the catalogue body byte for byte; `act`, `view` and `read` print the
   server's response). Nothing else is written to stdout.
 - Text that came from the server is stripped of terminal control characters
-  (everything except newline and tab) before it is printed.
+  (everything except newline and tab) and of invisible formatting characters (Unicode format
+  characters such as bidi overrides and zero-width characters, tag characters, line and
+  paragraph separators, the Hangul fillers and variation selectors U+E0100..E01EF) wherever
+  `kargo` prints or lists it: the catalogue's titles, descriptions and notes, help text, error
+  messages and the human-readable output. The zero-width joiner and the selectors U+FE00..FE0F
+  are kept so emoji stay whole. `--json` output and MCP `structuredContent` carry the server's
+  JSON unchanged.
 - A closed pipe (`kargo tools | head`) ends the run quietly with exit code 0.
 - Errors always go to stderr. With `--json` they are one object:
 
@@ -120,8 +152,13 @@ this build understands is refused with an "upgrade kargo" error.
 
 ## MCP behaviour
 
-- Tools: `view` (with a `section` enum), `help`, and one tool per catalogue
-  command, with the server's title, description, input schema and annotations.
+- Tools: `view` (with a `section` enum), `help`, one tool per catalogue
+  command, with the server's title, description, input schema and annotations, and one
+  read-only tool per catalogue read (`readOnlyHint`, idempotent, not destructive). Read tools
+  declare every listed parameter as `"type": "string"`, the one type every client accepts, but
+  also take numbers and booleans, sent as their text (`1.0` is sent as `1`). Unlisted
+  parameters, other value types and missing required ones are a `schema` tool error and nothing
+  is sent. They never wait in the per-token act queue.
   The list is refreshed when the 60 second catalogue TTL expires.
 - Results: the server JSON as `structuredContent` plus the same JSON as a text
   block. A rule refusal is `isError: true` with the server's message. Every

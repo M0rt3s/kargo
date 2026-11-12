@@ -61,6 +61,8 @@ impl ExitStatus {
 pub enum Surface {
     /// The command line: hints may name `kargo` commands and environment variables.
     Cli,
+    /// `kargo read`: usage hints point at the read tools rather than at game commands.
+    CliRead,
     /// An MCP server (stdio or hosted): the reader has tools, not a shell.
     Mcp,
 }
@@ -172,6 +174,12 @@ impl Error {
     pub fn hint(&self, surface: Surface) -> Option<&'static str> {
         match surface {
             Surface::Cli => self.cli_hint(),
+            Surface::CliRead => match self {
+                Error::Usage(_) | Error::Schema(_) => {
+                    Some("run `kargo read --help`, or `kargo read <tool> --help` for a tool's parameters")
+                }
+                _ => self.cli_hint(),
+            },
             Surface::Mcp => self.mcp_hint(),
         }
     }
